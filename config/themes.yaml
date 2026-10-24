@@ -1,0 +1,221 @@
+# Chaque thème garde la même mascotte. La variation et le seed rendent l'image unique.
+# motion.speed doit rester "slow" : le pipeline refuse un thème plus rapide.
+
+themes:
+  rainy_window:
+    title: "Pluie sur la fenêtre"
+    base_prompt: >
+      Interior of a small study at dusk, seen from a low cozy angle. A wide
+      window is covered in rain, a wooden desk holds a warm lamp, a steaming
+      ceramic mug, stacked clothbound books and a potted fern.
+    background_motion: >
+      raindrops slowly slide down the glass, a sheer curtain breathes in a
+      draft, steam curls upward from the mug
+    mascot_action: >
+      sits on the chair beside the window, both paws wrapped around the warm
+      mug, taking one tiny sip
+    lighting: "warm desk-lamp light against the cool blue rain outside"
+    palette: "dusty blue, amber, cream, soft chestnut"
+    motion:
+      speed: slow
+      ambience: "shoulders rise with one slow breath and the eyes blink once"
+    variations:
+      - "a knitted beige blanket is folded over the chair back"
+      - "a small round teapot sits beside the mug"
+      - "a paper star garland hangs still in the corner"
+      - "an open sketchbook and a pencil rest on the desk"
+
+  sunset_train:
+    title: "Soleil couchant en train"
+    base_prompt: >
+      A quiet countryside train compartment at sunset. Wooden seats, a half-open
+      window, golden fields and distant hills scrolling very slowly outside,
+      a paper ticket and a thermos on the small table.
+    background_motion: >
+      far clouds drift, grass on the embankment bends in a soft wind, warm dust
+      floats in the sunbeam crossing the compartment
+    mascot_action: >
+      sits by the window with the thermos between its paws, watching the fields
+      go by
+    lighting: "golden hour sun raking through the window"
+    palette: "peach, honey, faded green, warm brown"
+    motion:
+      speed: slow
+      ambience: "a slow breath, a soft blink, ears relaxed"
+    variations:
+      - "a sprig of dried flowers is tucked by the window latch"
+      - "a linen scarf rests on the empty seat"
+      - "a round pocket watch lies open on the table"
+      - "a single orange sits in a small wooden bowl"
+
+  night_train:
+    title: "Train de nuit"
+    base_prompt: >
+      A night train cabin in the quiet hours. Deep blue countryside outside,
+      distant warm windows of sleeping houses, a small reading lamp, a wool
+      blanket, and a cup of tea on the fold-out table.
+    background_motion: >
+      far station lights pass with a very slow drift, the reading lamp stays
+      steady, a loose curtain edge sways once
+    mascot_action: >
+      is tucked into the seat under the blanket, paws around the teacup,
+      almost dozing
+    lighting: "small warm lamp inside, cool moonlight outside"
+    palette: "indigo, muted gold, cream, charcoal"
+    motion:
+      speed: slow
+      ambience: "breathing slows, one gentle blink, no sudden head turn"
+    variations:
+      - "a tiny constellation chart is pinned above the seat"
+      - "a thermos cap rocks almost imperceptibly"
+      - "a folded newspaper lies unread on the blanket"
+      - "a glass of water catches a thin line of lamplight"
+
+  cozy_cafe:
+    title: "Café cosy"
+    base_prompt: >
+      A tiny corner café on a quiet afternoon. A round marble table by a rainy
+      pane, a croissant, a cup of hot chocolate, hanging plants, and shelves of
+      ceramic cups in the soft background.
+    background_motion: >
+      steam rises from the cup, a hanging plant leaf nods, rain on the pane
+      moves in slow streaks
+    mascot_action: >
+      sits at the table with both paws on the warm cup, mid quiet sip
+    lighting: "soft tungsten café lamps and a pale window"
+    palette: "caramel, cream, sage, blush"
+    motion:
+      speed: slow
+      ambience: "a slow breath and a tiny ear twitch, then stillness"
+    variations:
+      - "a checked napkin is folded under the croissant"
+      - "a small vase holds one chamomile flower"
+      - "a wool beret rests on the chair beside the table"
+      - "a handwritten menu card leans against the sugar bowl"
+
+  golden_meadow:
+    title: "Prairie au golden hour"
+    base_prompt: >
+      A Miyazaki-like hillside meadow at golden hour. Tall soft grass, a few
+      wildflowers, a distant round tree, and a picnic cloth spread on the slope.
+    background_motion: >
+      clouds drift, the grass waves in a slow continuous wind, a few pollen
+      specks float through the sun
+    mascot_action: >
+      sits on the picnic cloth with a small thermos, eyes half closed, content
+    lighting: "low warm sun, long soft shadows"
+    palette: "wheat gold, sage, sky peach, cream"
+    motion:
+      speed: slow
+      ambience: "breathing matches the grass, one slow blink"
+    variations:
+      - "a straw hat lies beside the cloth"
+      - "a closed sketchbook is held by a smooth stone"
+      - "a glass bottle of barley tea stands in the grass"
+      - "a single red wildflower leans toward the cloth"
+
+  snowy_bookshop:
+    title: "Librairie sous la neige"
+    base_prompt: >
+      A narrow bookshop at blue hour while snow falls outside the front glass.
+      Tall shelves, a wooden ladder, a green glass lamp, and an armchair near
+      the window.
+    background_motion: >
+      snowflakes drift downward outside, a page corner lifts in the warm air,
+      the lamp glow stays constant
+    mascot_action: >
+      sits in the armchair with an open picture book on its lap, reading slowly
+    lighting: "green lamp glow and cool snow light from the window"
+    palette: "ink blue, forest green, paper cream, wood brown"
+    motion:
+      speed: slow
+      ambience: "a slow breath, a soft blink, the page does not turn"
+    variations:
+      - "a mug of cocoa rests on a stack of atlases"
+      - "a sleeping cat-shaped cushion, empty, sits by the chair"
+      - "a paper snowflake hangs from a shelf"
+      - "a wool pom-pom scarf drapes over the chair arm"
+
+  forest_stream:
+    title: "Ruisseau en forêt"
+    base_prompt: >
+      A quiet mossy forest bend with a shallow clear stream, round stones,
+      ferns, and filtered daylight. A flat rock makes a natural seat.
+    background_motion: >
+      the water surface shimmers slowly, ferns sway, a few leaves drift on the
+      current
+    mascot_action: >
+      sits on the flat rock with paws resting on its knees, watching the water
+    lighting: "dappled soft daylight, no hard shadows"
+    palette: "moss green, stone gray, water silver, warm brown"
+    motion:
+      speed: slow
+      ambience: "breathing is slow, one blink, the tail of the sweater hem stirs once"
+    variations:
+      - "a tiny wooden cup sits on the rock"
+      - "a closed umbrella leans against a root"
+      - "a paper boat is caught gently against a stone"
+      - "a sprig of mint lies on the moss"
+
+  starry_rooftop:
+    title: "Toit sous les étoiles"
+    base_prompt: >
+      A tiled rooftop above a sleeping town, late and clear. A folded blanket,
+      a small lantern, chimney silhouettes, and a wide soft sky.
+    background_motion: >
+      clouds crawl across the stars, the lantern flame breathes, a distant
+      curtain in a window below shifts once
+    mascot_action: >
+      sits wrapped in the blanket, paws around a warm cup, looking at the sky
+    lighting: "lantern gold against a deep calm night sky"
+    palette: "midnight blue, lantern amber, terracotta, cream"
+    motion:
+      speed: slow
+      ambience: "a long slow breath and a single peaceful blink"
+    variations:
+      - "a small telescope stands unused beside the blanket"
+      - "a thermos and two stacked cups sit on a tile"
+      - "a paper plane rests under a smooth stone"
+      - "string lights along the parapet glow faintly"
+
+  lakeside_boat:
+    title: "Barque au crépuscule"
+    base_prompt: >
+      A still lake at dusk with a small wooden rowboat near a reed bed. Distant
+      hills, a soft reflection, and a lantern hung on the boat's prow.
+    background_motion: >
+      the reflection wobbles very slightly, reeds nod, thin mist drifts over
+      the water
+    mascot_action: >
+      sits in the boat facing the lake, one paw on the gunwale, perfectly at ease
+    lighting: "dusky pink sky and a small lantern"
+    palette: "lilac, reed green, faded rose, wood brown"
+    motion:
+      speed: slow
+      ambience: "breathing is quiet, a soft blink, the boat does not rock hard"
+    variations:
+      - "a folded map is weighted by a pebble"
+      - "a basket with a cloth cover sits behind the seat"
+      - "a single water lily floats near the hull"
+      - "a wool blanket covers the capybara's knees"
+
+  rainy_balcony:
+    title: "Balcon sous la pluie"
+    base_prompt: >
+      A plant-filled apartment balcony under a gentle rain, city far and quiet
+      below. Terracotta pots, a canvas awning, a low stool and a side table.
+    background_motion: >
+      rain threads off the awning, leaves quiver, a wind chime turns a few
+      degrees and settles
+    mascot_action: >
+      sits on the stool under the awning, holding a warm cup, listening to the rain
+    lighting: "overcast soft light with a warm interior glow behind the glass door"
+    palette: "sage, wet terracotta, gray-blue, cream"
+    motion:
+      speed: slow
+      ambience: "a slow breath, one blink, ears calm"
+    variations:
+      - "a yellow raincoat is hung on a hook, unused"
+      - "a watering can rests among the pots"
+      - "a notebook is closed on the side table"
+      - "a small radio lantern glows on the floor"
