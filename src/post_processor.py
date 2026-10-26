@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -281,10 +282,25 @@ def _fps(value: str) -> float:
 
 
 def _tool(name: str) -> str:
+    """Préfère le binaire déjà validé pour Wan2GP, puis le PATH."""
+    for key in _binary_env_keys(name):
+        value = os.environ.get(key, "").strip()
+        if value and Path(value).is_file():
+            return value
     found = shutil.which(name)
     if found is None:
         raise PipelineError(f"{name} est absent du PATH. Installer FFmpeg.")
     return found
+
+
+def _binary_env_keys(name: str) -> tuple[str, ...]:
+    match name:
+        case "ffmpeg":
+            return ("FFMPEG_BINARY", "IMAGEIO_FFMPEG_EXE")
+        case "ffprobe":
+            return ("FFPROBE_BINARY",)
+        case _:
+            return ()
 
 
 def _run(command: list[str], failure: str) -> None:

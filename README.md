@@ -16,7 +16,7 @@ Relevé sur la documentation et le handler Wan du dépôt `deepbeepmeep/Wan2GP` 
 | VRAM | Profil **4** : le modèle monte sur le GPU par blocs. Profil 5 si la RAM est juste elle aussi. Attention `sdpa` pour les GTX 10XX comme pour les RTX récentes. |
 | Lancement sans interface | `python wgp.py --process file.zip --output-dir ... --verbose 2` |
 
-La file est un zip avec `queue.json` (`settings_version` 2.81, `multi_prompts_gen_type` `FG`). Les clés suivent la documentation WanGP : `model_type`, `image_mode`, `prompt`, `negative_prompt`, `resolution`, `video_length`, `force_fps`, `num_inference_steps`, `guidance_scale`, `seed`, `override_profile`.
+La file est un zip avec `queue.json` (`settings_version` repris de `wgp.py`, 2.79 sur WanGP 17.17, `multi_prompts_gen_type` `FG`). Les clés suivent la documentation WanGP : `model_type`, `image_mode`, `prompt`, `negative_prompt`, `resolution`, `video_length`, `force_fps`, `num_inference_steps`, `guidance_scale`, `seed`, `override_profile`.
 
 Les résolutions par défaut restent au voisinage du 480p du modèle 1.3B, sur la grille de 16 pixels du VAE : **480×832** (9:16) et **624×624** (1:1).
 
@@ -76,7 +76,7 @@ pip install -r requirements.txt
 export WAN2GP_ROOT=/chemin/vers/Wan2GP
 ```
 
-`ffmpeg` et `ffprobe` servent à Wan2GP pour muxer le MP4, puis à la boucle. Ils tournent sur le CPU. Les laisser dans le PATH, avec libx264 : `apt install ffmpeg` sous Debian/Ubuntu, build officiel avec PATH sous Windows. Avant le GPU, le script vérifie les deux binaires et passe `FFMPEG_BINARY`, `FFPROBE_BINARY` et `IMAGEIO_FFMPEG_EXE` au processus.
+`ffmpeg` et `ffprobe` servent à Wan2GP pour muxer le MP4, puis à la boucle. Ils tournent sur le CPU. Wan2GP les cherche d'abord dans `<WAN2GP_ROOT>/ffmpeg_bins`, puis à la racine du clone, puis dans le PATH, et il écrase `FFMPEG_BINARY` avec ce choix. Le script valide ce binaire-là (libx264) avant le GPU, puis publie `FFMPEG_BINARY`, `FFPROBE_BINARY` et `IMAGEIO_FFMPEG_EXE`. Sous Debian/Ubuntu : `apt install ffmpeg`. Un binaire sans libx264 dans `ffmpeg_bins` bloque le lancement, même si le PATH en a un bon.
 
 `WAN2GP_PYTHON` peut pointer vers le Python du conda si `main.py` est lancé depuis un autre interpréteur. Le lancement est toujours `wgp.py --process`, y compris si `backend` vaut `api`.
 
@@ -149,5 +149,5 @@ Les tests couvrent le prompt, la grille d'images, la file headless, le refus d'u
 - `wgp.py introuvable` : le chemin pointe à côté du dépôt WanGP.
 - WanGP s'arrête tout de suite : lire `output/logs/`. Un `model_type` inconnu de cette version se corrige via l'export de réglages de l'interface.
 - Un JPEG apparaît dans `output/raw/` et le script s'arrête : la file n'est pas en `t2v_1.3B` / `image_mode` 0, ou FFmpeg n'a pas pu muxer. Le code de sortie de WanGP ne suffit pas.
-- `ffmpeg est installé sans libx264` : installer un FFmpeg complet, puis relancer.
+- `n'offre pas libx264` : le binaire choisi par Wan2GP (souvent `ffmpeg_bins`) ne sait pas encoder en H.264. Le remplacer, ou l'enlever pour retomber sur le ffmpeg du PATH.
 - La boucle saute encore : baisser `post.crossfade_seconds` reste au-dessus de 0,2 s, ou générer à nouveau. Le mouvement très lent est aussi porté par le prompt.

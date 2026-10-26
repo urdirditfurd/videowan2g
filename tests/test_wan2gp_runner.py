@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,7 +22,13 @@ from src.config_loader import load_pipeline_config
 from src.errors import Wan2GPError
 from src.pipeline import RunOptions, run
 from src.prompt_builder import build_prompt, load_catalog
-from src.wan2gp_runner import GenerationRequest, generate, parse_resolution, snap_frame_count
+from src.wan2gp_runner import (
+    GenerationRequest,
+    generate,
+    parse_resolution,
+    resolve_settings_version,
+    snap_frame_count,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,7 +81,7 @@ class DryRunTest(unittest.TestCase):
             self.assertEqual(payload["model_type"], "t2v_1.3B")
             self.assertEqual(payload["base_model_type"], "t2v_1.3B")
             self.assertEqual(payload["image_mode"], 0)
-            self.assertEqual(payload["settings_version"], 2.81)
+            self.assertEqual(payload["settings_version"], 2.79)
             self.assertEqual(payload["multi_prompts_gen_type"], "FG")
             self.assertEqual(payload["video_length"], 81)
             self.assertEqual(payload["resolution"], "624x624")
@@ -253,6 +261,110 @@ class DryRunTest(unittest.TestCase):
                             )
                         )
             self.assertIn("ffmpeg", str(caught.exception))
+
+    def test_installed_settings_version_is_copied_into_the_queue(self) -> None:
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("# wan\nsettings_version = 2.81\n", encoding="utf-8")
+            result = generate(
+                GenerationRequest(
+                    prompt=build_prompt(theme, 13),
+                    settings=replace(config.wan, root=root),
+                    output_dir=Path(directory) / "out",
+                    aspect="9:16",
+                    dry_run=True,
+                )
+            )
+            payload = json.loads(result.settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["settings_version"], 2.81)
+            self.assertEqual(resolve_settings_version(None), 2.79)
+
+    def test_wan_ffmpeg_bins_are_used_when_present(self) -> None:
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            output = Path(directory) / "out"
+            bins = root / "ffmpeg_bins"
+            bins.mkdir(parents=True)
+            (root / "wgp.py").write_text("# faux wan\n", encoding="utf-8")
+            ffmpeg_link = bins / "ffmpeg"
+            ffprobe_link = bins / "ffprobe"
+            ffmpeg_link.symlink_to(system_ffmpeg)
+            ffprobe_link.symlink_to(system_ffprobe)
+            seen: dict[str, str] = {}
+            previous = {
+                key: os.environ.get(key)
+                for key in ("FFMPEG_BINARY", "FFPROBE_BINARY", "IMAGEIO_FFMPEG_EXE")
+            }
+
+            def fake_wan(command: list[str], **kwargs: object) -> _FakeProcess:
+                env = kwargs.get("env")
+                assert isinstance(env, dict)
+                seen["ffmpeg"] = str(env["FFMPEG_BINARY"])
+                raw = Path(command[command.index("--output-dir") + 1])
+                raw.mkdir(parents=True, exist_ok=True)
+                _encode(raw / "clip.mp4", seconds=0.2, frames=4)
+                return _FakeProcess()
+
+            try:
+                with mock.patch("src.wan2gp_runner.subprocess.Popen", side_effect=_popen_except_ffmpeg(fake_wan)):
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 14),
+                            settings=replace(config.wan, root=root),
+                            output_dir=output,
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            self.assertEqual(Path(seen["ffmpeg"]).resolve(), Path(system_ffmpeg).resolve())
+            self.assertEqual(seen["ffmpeg"], str(ffmpeg_link))
+
+    def test_broken_ffmpeg_bins_stop_before_the_gpu(self) -> None:
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            bins = root / "ffmpeg_bins"
+            bins.mkdir(parents=True)
+            (root / "wgp.py").write_text("# faux wan\n", encoding="utf-8")
+            for name in ("ffmpeg", "ffprobe"):
+                binary = bins / name
+                binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                binary.chmod(0o755)
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 15),
+                            settings=replace(config.wan, root=root),
+                            output_dir=Path(directory) / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            self.assertIn("libx264", str(caught.exception))
+            self.assertIn("ffmpeg_bins", str(caught.exception))
 
     def test_real_run_without_install_stops_before_the_gpu(self) -> None:
         config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")

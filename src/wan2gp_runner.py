@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,8 +36,11 @@ FRAME_STEP = 4
 # Au-delà, le 1.3B sort de la longueur sur laquelle il est à l'aise, et la VRAM monte.
 COMFORT_FRAMES = 81
 VAE_MULTIPLE = 16
-# Schéma des réglages WanGP (wgp.py, octobre 2026).
-SETTINGS_VERSION = 2.81
+# Schéma lu dans wgp.py sur main (WanGP 17.17). Le clone installé est relu s'il diffère.
+SETTINGS_VERSION = 2.79
+_SETTINGS_VERSION_RE = re.compile(
+    r"(?m)^settings_version\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$"
+)
 # Un plan d'une image, ou un JPEG renommé, reste sous ce seuil.
 MIN_VIDEO_SECONDS = 0.15
 MIN_VIDEO_FRAMES = 2
@@ -156,6 +160,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         frames=frames,
         resolution=resolution,
         stem=stem,
+        settings_version=resolve_settings_version(wan.root),
     )
     settings_path = job_dir / f"{stem}.settings.json"
     queue_path = job_dir / f"{stem}.queue.zip"
@@ -182,7 +187,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
     if not wgp.is_file():
         raise Wan2GPError(f"wgp.py introuvable dans {root}.")
 
-    binaries = require_ffmpeg()
+    binaries = require_ffmpeg(root)
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
     match wan.backend:
@@ -234,30 +239,90 @@ def build_command(wan: WanSettings, queue_path: Path, raw_dir: Path) -> tuple[st
     return tuple(command)
 
 
-def require_ffmpeg() -> FfmpegBinaries:
-    """Vérifie ffmpeg et ffprobe, avec un encodeur H.264, avant le GPU."""
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
+def resolve_settings_version(root: Path | None) -> float:
+    """Reprend ``settings_version`` du ``wgp.py`` installé, sinon la valeur de main."""
+    if root is not None:
+        source = root / "wgp.py"
+        if source.is_file():
+            head = source.read_text(encoding="utf-8", errors="replace")[:8000]
+            match = _SETTINGS_VERSION_RE.search(head)
+            if match:
+                return float(match.group(1))
+    return SETTINGS_VERSION
+
+
+def require_ffmpeg(root: Path | None = None) -> FfmpegBinaries:
+    """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
+
+    ``download_ffmpeg`` regarde ``<root>/ffmpeg_bins``, puis la racine du clone,
+    puis le PATH, et écrase ``FFMPEG_BINARY``. Un binaire cassé dans ``ffmpeg_bins``
+    masque donc un ffmpeg système correct.
+    """
+    ffmpeg = _resolve_binary("ffmpeg", root)
+    ffprobe = _resolve_binary("ffprobe", root)
     if ffmpeg is None or ffprobe is None:
         raise Wan2GPError(
-            "ffmpeg et ffprobe doivent être dans le PATH. Wan2GP s'en sert pour muxer le MP4. "
+            "ffmpeg et ffprobe sont introuvables. Wan2GP les cherche dans "
+            "<WAN2GP_ROOT>/ffmpeg_bins, puis à la racine du clone, puis dans le PATH. "
             "Sous Debian/Ubuntu : apt install ffmpeg."
         )
-    encoders = subprocess.run(
-        [ffmpeg, "-hide_banner", "-encoders"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    _require_libx264(ffmpeg)
+    _require_ffprobe(ffprobe)
+    binaries = FfmpegBinaries(ffmpeg=str(ffmpeg), ffprobe=str(ffprobe))
+    os.environ["FFMPEG_BINARY"] = binaries.ffmpeg
+    os.environ["FFPROBE_BINARY"] = binaries.ffprobe
+    os.environ["IMAGEIO_FFMPEG_EXE"] = binaries.ffmpeg
+    return binaries
+
+
+def _binary_name(name: str) -> str:
+    if os.name == "nt" and not name.endswith(".exe"):
+        return f"{name}.exe"
+    return name
+
+
+def _resolve_binary(name: str, root: Path | None) -> Path | None:
+    filename = _binary_name(name)
+    if root is not None:
+        for candidate in (root / "ffmpeg_bins" / filename, root / filename):
+            if candidate.is_file():
+                return candidate
+    found = shutil.which(filename)
+    if found is None and filename != name:
+        found = shutil.which(name)
+    return Path(found) if found else None
+
+
+def _require_libx264(ffmpeg: Path) -> None:
+    try:
+        encoders = subprocess.run(
+            [str(ffmpeg), "-hide_banner", "-encoders"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise Wan2GPError(f"Impossible de lancer {ffmpeg} : {exc}") from exc
     if encoders.returncode != 0 or "libx264" not in encoders.stdout:
         raise Wan2GPError(
-            "ffmpeg est installé sans libx264. Wan2GP ne peut pas écrire un MP4 H.264 avec ce binaire."
+            f"{ffmpeg} n'offre pas libx264. Wan2GP prend ce binaire avant le PATH "
+            "et ne peut pas muxer un MP4 H.264."
         )
-    probe = subprocess.run([ffprobe, "-version"], check=False, capture_output=True, text=True)
+
+
+def _require_ffprobe(ffprobe: Path) -> None:
+    try:
+        probe = subprocess.run(
+            [str(ffprobe), "-version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise Wan2GPError(f"Impossible de lancer {ffprobe} : {exc}") from exc
     if probe.returncode != 0:
         detail = (probe.stderr or probe.stdout).strip()
-        raise Wan2GPError(f"ffprobe ne démarre pas. {detail}".strip())
-    return FfmpegBinaries(ffmpeg=ffmpeg, ffprobe=ffprobe)
+        raise Wan2GPError(f"ffprobe ne démarre pas ({ffprobe}). {detail}".strip())
 
 
 def ffmpeg_env(binaries: FfmpegBinaries) -> dict[str, str]:
@@ -277,12 +342,13 @@ def _settings_payload(
     frames: int,
     resolution: str,
     stem: str,
+    settings_version: float,
 ) -> dict[str, object]:
     prompt = request.prompt
     payload: dict[str, object] = {
         "model_type": model_type,
         "base_model_type": model_type,
-        "settings_version": SETTINGS_VERSION,
+        "settings_version": settings_version,
         "image_mode": 0,
         "prompt": prompt.prompt,
         "negative_prompt": prompt.negative_prompt,
@@ -299,11 +365,11 @@ def _settings_payload(
         "multi_prompts_gen_type": "FG",
     }
     payload.update(request.settings.extra_settings)
-    _lock_text_to_video(payload, model_type)
+    _lock_text_to_video(payload, model_type, settings_version)
     return payload
 
 
-def _lock_text_to_video(payload: dict[str, object], model_type: str) -> None:
+def _lock_text_to_video(payload: dict[str, object], model_type: str, settings_version: float) -> None:
     requested = payload.get("model_type", model_type)
     if not isinstance(requested, str) or _is_image_model(requested) or requested != model_type:
         raise Wan2GPError(
@@ -323,7 +389,7 @@ def _lock_text_to_video(payload: dict[str, object], model_type: str) -> None:
             )
     payload["model_type"] = model_type
     payload["base_model_type"] = model_type
-    payload["settings_version"] = SETTINGS_VERSION
+    payload["settings_version"] = settings_version
     payload["image_mode"] = 0
     payload["multi_prompts_gen_type"] = "FG"
 
@@ -399,7 +465,11 @@ def _require_mp4(directory: Path, before: dict[Path, int], ffprobe: str, log_pat
         details.append("Fichiers .mp4 illisibles comme vidéo : " + "; ".join(rejected) + ".")
     if not details:
         details.append(f"Aucun fichier nouveau dans {directory}.")
+    details.append("Wan2GP a quitté avec le code 0.")
     details.append(f"Journal : {log_path}.")
+    tail = _tail(log_path) if log_path.is_file() else ""
+    if any(marker in tail for marker in ("[SKIP]", "[ERROR]", "nothing to process", "failed validation")):
+        details.append(tail)
     raise Wan2GPError(" ".join(details))
 
 
