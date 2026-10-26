@@ -1,0 +1,56 @@
+# Réglages techniques. Les thèmes visuels sont dans themes.yaml.
+# Les prompts restent en anglais : Wan 2.1 suit mieux le style et le mouvement ainsi.
+
+wan2gp:
+  # Clone https://github.com/deepbeepmeep/Wan2GP — ou variable d'environnement WAN2GP_ROOT.
+  root: ""
+  # Interpréteur du conda wan2gp. Vide = l'interpréteur qui lance main.py.
+  # Variable d'environnement prioritaire : WAN2GP_PYTHON.
+  python: ""
+  # subprocess libère la VRAM à la fin du processus.
+  # api garde le modèle chargé (même interpréteur que Wan2GP, plus rapide en série).
+  backend: subprocess
+  # Seul t2v_1.3B est lancé. Fun_InP_1.3B (I2V) peut enregistrer un JPEG
+  # et quitter avec un code succès : le runner refuse ce modèle et toute image de départ.
+  model_type: "t2v_1.3B"
+  # Conservé pour les anciens fichiers. Ignoré par le runner.
+  i2v_model_type: "fun_inp_1.3B"
+  # Profil 4 : le modèle part vers le GPU par blocs. C'est le profil souple
+  # pour une carte grand public. Profil 5 si la RAM et la VRAM sont toutes deux justes.
+  # Profil 1 seulement quand le modèle tient entier dans la VRAM.
+  profile: 4
+  # sdpa fonctionne des GTX 10XX aux RTX récentes. sage2 exige Ampere ou plus récent.
+  attention: sdpa
+  # true pour les cartes qui n'aiment pas le bf16 (souvent les GTX 10XX).
+  fp16: false
+  # 81 = 4*20+1, grille valide du handler Wan (minimum 5, pas 4). À 16 i/s : 5,06 s.
+  frames: 81
+  fps: 16
+  steps: 20
+  # 5.0 : proche des défauts Wan, assez souple pour un mouvement lent non figé.
+  guidance_scale: 5.0
+  aspect: "9:16"
+  # 480x832 est le portrait 480p du 1.3B. 624x624 reste proche de la même surface
+  # (le VAE Wan 1.3B aligne sur 16 pixels).
+  resolutions:
+    "9:16": "480x832"
+    "1:1": "624x624"
+  timeout_seconds: 2700
+  # Clés de réglages WanGP ajoutées telles quelles (flow_shift, etc.).
+  extra_settings: {}
+
+output_dir: output
+
+post:
+  # Le fondu recouvre la jointure. La durée utile vaut durée source moins ce fondu.
+  crossfade_seconds: 0.35
+  # Grain léger. 0 le désactive. Le seed du grain suit le seed de génération.
+  grain: 4
+  warm_grade: true
+  crf: 18
+
+audio:
+  enabled: false
+  # Fichier local libre de droits fourni par l'opérateur. Le script ne télécharge rien.
+  path: ""
+  volume: 0.22
