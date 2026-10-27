@@ -1,0 +1,19 @@
+{
+  "name": "videowan2g",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Génération headless de vidéos lofi capybara (Agnes AI) et publication sur GitHub",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node automation.js",
+    "self-test": "node automation.js --self-test"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-fetch": "^3.3.2",
+    "simple-git": "^4.0.2"
+  }
+}
