@@ -6252,6 +6252,128 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("Aucun fichier", message)
             self.assertIn("[SKIP]", message)
 
+    def test_proc_cwd_config_container_stops_before_the_gpu(self) -> None:
+        """``open("wgp_config.json")`` suit le cwd du clone, pas celui du pipeline.
+
+        Le lien vise ``/proc/self/cwd/secret.json``,
+        ``/proc/net/../cwd/secret.json`` ou ``hop1/../cwd/secret.json``
+        (``hop1`` → ``hop2`` → ``/proc/net``). Depuis le pipeline, ``is_file``
+        est faux, ou le leurre est un ``mp4``. Le clone a un ``mkv`` (ou un
+        codec ProRes). WanGP écrit ce conteneur et sort 0, sans MP4.
+        """
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        shapes = ("self-missing", "proc-net-decoy", "hop-decoy", "self-prores")
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                previous = Path.cwd()
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = base / "wan"
+                    root.mkdir()
+                    (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+                    if shape == "self-prores":
+                        hidden = {
+                            "video_container": "mp4",
+                            "video_output_codec": "prores_422",
+                        }
+                    else:
+                        hidden = {
+                            "video_container": "mkv",
+                            "video_output_codec": "libx264_8",
+                        }
+                    (root / "secret.json").write_text(
+                        json.dumps(hidden) + "\n",
+                        encoding="utf-8",
+                    )
+                    if shape == "hop-decoy":
+                        (root / "hop2").symlink_to("/proc/net")
+                        (root / "hop1").symlink_to("hop2")
+                        (root / "wgp_config.json").symlink_to("hop1/../cwd/secret.json")
+                    elif shape == "proc-net-decoy":
+                        (root / "wgp_config.json").symlink_to("/proc/net/../cwd/secret.json")
+                    else:
+                        (root / "wgp_config.json").symlink_to("/proc/self/cwd/secret.json")
+                    decoy = base / "pipeline"
+                    decoy.mkdir()
+                    if shape in {"proc-net-decoy", "hop-decoy"}:
+                        (decoy / "secret.json").write_text(
+                            '{"video_container": "mp4", "video_output_codec": "libx264_8"}\n',
+                            encoding="utf-8",
+                        )
+                    try:
+                        os.chdir(decoy)
+                        link = root / "wgp_config.json"
+                        if shape in {"self-missing", "self-prores"}:
+                            self.assertFalse(link.is_file())
+                        else:
+                            self.assertTrue(link.is_file())
+                            self.assertIn("mp4", link.read_text(encoding="utf-8"))
+                            self.assertNotIn("mkv", link.read_text(encoding="utf-8"))
+
+                        def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                            raise AssertionError("GPU")
+
+                        with mock.patch(
+                            "src.wan2gp_runner.subprocess.Popen",
+                            side_effect=_popen_except_ffmpeg(refuse_gpu),
+                        ):
+                            with self.assertRaises(Wan2GPError) as caught:
+                                generate(
+                                    GenerationRequest(
+                                        prompt=build_prompt(theme, 71),
+                                        settings=replace(config.wan, root=root),
+                                        output_dir=base / "out",
+                                        aspect="9:16",
+                                        dry_run=False,
+                                    )
+                                )
+                        message = str(caught.exception)
+                        self.assertIn("/proc/self", message)
+                        self.assertIn("secret.json", message)
+                        self.assertIn("code 0", message)
+                        if shape == "self-prores":
+                            self.assertIn("ProRes", message)
+                        else:
+                            self.assertIn("mkv", message)
+                            self.assertIn("video_container", message)
+                    finally:
+                        os.chdir(previous)
+
+    def test_proc_cwd_config_ignores_a_pipeline_container(self) -> None:
+        """Un ``mkv`` du cwd du pipeline n'est pas le ``wgp_config.json`` du clone.
+
+        Le leurre rend ``is_file`` vrai ici. Le clone n'a pas ce fichier.
+        WanGP écrit la config par défaut, conteneur ``mp4``.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            (root / "wgp_config.json").symlink_to("/proc/self/cwd/secret.json")
+            decoy = base / "pipeline"
+            decoy.mkdir()
+            (decoy / "secret.json").write_text(
+                '{"video_container": "mkv", "video_output_codec": "libx264_8"}\n',
+                encoding="utf-8",
+            )
+            try:
+                os.chdir(decoy)
+                link = root / "wgp_config.json"
+                self.assertTrue(link.is_file())
+                self.assertIn("mkv", link.read_text(encoding="utf-8"))
+                self.assertFalse((root / "secret.json").exists())
+                binaries = wan2gp_runner.require_ffmpeg(root)
+                self.assertEqual(Path(binaries.ffmpeg).resolve(), Path(system_ffmpeg).resolve())
+            finally:
+                os.chdir(previous)
+
     def test_mkv_container_stops_before_the_gpu(self) -> None:
         config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
         theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
