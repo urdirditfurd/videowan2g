@@ -1,0 +1,22 @@
+[
+  {
+    "description": "maison japonaise sous la pluie",
+    "mood": "rainy_forest"
+  },
+  {
+    "description": "intérieur douillet avec un livre et un thé",
+    "mood": "cozy_room"
+  },
+  {
+    "description": "lac de montagne au petit matin",
+    "mood": "mountain_lake"
+  },
+  {
+    "description": "jardin de mousse, lanternes de pierre et bassin",
+    "mood": "japanese_garden"
+  },
+  {
+    "description": "train côtier au crépuscule, vagues lentes et ciel pastel",
+    "mood": "ocean_breeze"
+  }
+]
