@@ -280,8 +280,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         )
 
     root = _require_root(wan)
-    wgp = root / "wgp.py"
-    if not wgp.is_file():
+    if _visible_wan_script(root) is None:
         raise Wan2GPError(f"wgp.py introuvable dans {root}.")
 
     binaries = require_ffmpeg(root, wan.python or sys.executable)
@@ -345,8 +344,8 @@ def resolve_settings_version(root: Path | None) -> float:
     La première affectation de module est la bonne : les suivantes sont des paramètres.
     """
     if root is not None:
-        source = root / "wgp.py"
-        if source.is_file():
+        source = _visible_wan_script(root)
+        if source is not None:
             match = _SETTINGS_VERSION_RE.search(source.read_text(encoding="utf-8", errors="replace"))
             if match:
                 return float(match.group(1))
@@ -454,8 +453,22 @@ def require_ffmpeg(root: Path | None = None, python: str | None = None) -> Ffmpe
     ``-encoders`` sans ce préfixe annonce encore libx264, ``save_video``
     imprime ``error saving`` et le CLI sort 0, sans MP4. Le même lien sur
     le fichier ``ffmpeg_setup.py`` (pas sur le dossier ``shared``) a le
-    même effet. Un soname présent seulement dans le cwd du pipeline n'est
+    même effet.     Un soname présent seulement dans le cwd du pipeline n'est
     pas celui que le chargeur ouvre.
+    ``wgp.py`` peut être ce lien, plutôt que ``shared``. ``sys.path[0]``
+    initial est le ``realpath`` du script, calculé avec le cwd du clone.
+    ``wgp.py`` insère ensuite ``os.path.dirname(os.path.abspath(__file__))``,
+    qui ne résout pas le lien. ``wgp.py`` → ``/proc/self/cwd/nested/wgp.py``,
+    ``/proc/net/../cwd/nested/wgp.py`` ou ``hop1/../cwd/nested/wgp.py``
+    (``hop1`` → ``hop2`` → ``/proc/net``) : ``is_file`` et ``Path.resolve()``
+    ici ouvrent le dossier du pipeline. Un leurre ``wgp.py`` rend le script
+    présent, et sans leurre ``is_file`` est faux alors que le clone a le
+    fichier. Sans ``shared/ffmpeg_setup.py`` dans le dossier du lien,
+    l'import tombe sur ``<clone>/nested/shared``. ``download_ffmpeg`` préfixe
+    ``<clone>/nested/ffmpeg_bins``. Une ``libx264.so*`` trop courte seulement
+    là donne ``file too short``. ``-encoders`` sans ce préfixe annonce encore
+    libx264, ``save_video`` imprime ``error saving`` et le CLI sort 0, sans
+    MP4.
     Avant ce téléchargement, ``preload_preferred_libstdcxx``
     (``shared/native_runtime.py``) ajoute le dossier de ``libstdc++.so.6``
     si le processus ne l'a pas encore chargé. Le fichier est cherché dans
@@ -1311,12 +1324,14 @@ def _ffmpeg_library_root(root: Path) -> Path:
 
     ``Path(__file__).resolve().parents[1]`` suit un lien
     ``shared/ffmpeg_setup.py`` vers un autre clone. Si ``wgp.py`` est un lien,
-    ``sys.path[0]`` est le dossier réel et le module est chargé là. Le cwd du
-    processus reste le clone passé au runner : ce n'est pas ce dossier qui
-    fournit les bibliothèques.
+    ``sys.path[0]`` initial est le ``realpath`` de ce script. ``wgp.py`` insère
+    devant le dossier de ``os.path.abspath(__file__)``, qui ne suit pas le lien.
+    Sans module à cet endroit, l'import retombe sur le dossier réel. Le cwd du
+    processus reste le clone passé au runner.
     Un lien qui passe par ``/proc/self`` se résout avec ce cwd. ``Path.resolve``
     dans le contrôle suit le cwd du pipeline et peut viser un autre
     ``ffmpeg_bins``, ou ignorer le fichier s'il n'existe que dans le clone.
+    ``wgp.py`` lui-même peut être ce lien (``/proc/self/cwd/nested/wgp.py``).
     """
     if os.name == "nt":
         return root
@@ -1330,14 +1345,71 @@ def _ffmpeg_library_root(root: Path) -> Path:
         linked = False
     if not linked:
         return root
-    try:
-        target = wgp.resolve().parent
-    except OSError:
+    parent = _symlink_script_parent(wgp, root)
+    if parent is None:
         return root
-    nested = _resolved_ffmpeg_setup(target / "shared" / "ffmpeg_setup.py", root)
+    nested = _resolved_ffmpeg_setup(parent / "shared" / "ffmpeg_setup.py", root)
     if nested is not None:
         return nested
-    return target
+    return parent
+
+
+def _visible_wan_script(root: Path) -> Path | None:
+    """``wgp.py`` ouvert quand le cwd du processus est le clone.
+
+    ``Path.is_file`` suit ``/proc/self`` du contrôle. Un leurre dans le
+    dossier du pipeline rend le script présent, et l'absence de leurre le
+    rend introuvable, alors que le clone a ``nested/wgp.py``.
+    """
+    wgp = root / "wgp.py"
+    try:
+        absolute = str(wgp.absolute())
+    except OSError:
+        return None
+    if os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        opened = _realpath_from_cwd(wgp, root)
+        if opened is None:
+            return None
+        try:
+            if not opened.is_file():
+                return None
+        except OSError:
+            return None
+        return opened
+    try:
+        if wgp.is_file():
+            return wgp
+    except OSError:
+        return None
+    return None
+
+
+def _symlink_script_parent(wgp: Path, root: Path) -> Path | None:
+    """Dossier que Python place dans ``sys.path[0]`` pour ce lien.
+
+    C'est le ``realpath`` du script, pas ``Path.resolve()`` du contrôle.
+    ``/proc/self`` dépend du cwd. Le processus WanGP a celui du clone.
+    """
+    try:
+        absolute = str(wgp.absolute())
+    except OSError:
+        return None
+    if os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        opened = _realpath_from_cwd(wgp, root)
+        if opened is None:
+            return None
+        try:
+            if not opened.is_file():
+                return None
+        except OSError:
+            return None
+        return opened.parent
+    try:
+        if not wgp.is_file():
+            return None
+        return wgp.resolve().parent
+    except OSError:
+        return None
 
 
 def _realpath_from_cwd(path: Path, cwd: Path) -> Path | None:
@@ -1424,6 +1496,41 @@ def _proc_setup_note(root: Path) -> str:
         "Le processus WanGP a pour cwd le clone : Path(__file__).resolve() "
         "dans shared/ffmpeg_setup.py retombe sur ce dossier. "
         "download_ffmpeg préfixe son ffmpeg_bins. "
+        "Une libx264.so* trop courte, absente du dossier vu d'ici, donne file too short. "
+        "ffmpeg -encoders sans ce préfixe annonce encore libx264. "
+        "save_video imprime error saving et le processus quitte avec le code 0, sans MP4. "
+    )
+
+
+def _proc_script_note(root: Path, library_root: Path) -> str:
+    """Pourquoi ``Path.resolve`` du contrôle ne voit pas le ``wgp.py`` de WanGP.
+
+    Le lien est sur le script, pas sur ``shared``. ``sys.path[0]`` initial
+    est le ``realpath`` calculé avec le cwd du clone. Sans module dans le
+    dossier du lien, l'import charge ``nested/shared/ffmpeg_setup.py``.
+    """
+    wgp = root / "wgp.py"
+    try:
+        absolute = str(wgp.absolute())
+    except OSError:
+        return ""
+    if os.name == "nt" or not _path_depends_on_proc_cwd(absolute):
+        return ""
+    opened = _realpath_from_cwd(wgp, root)
+    if opened is None:
+        return ""
+    parent = opened.parent
+    if not _same_directory(parent, library_root):
+        return ""
+    return (
+        f"{wgp} suit /proc/self jusqu'au cwd du processus. "
+        f"Path.resolve() depuis le pipeline n'ouvre pas {parent}. "
+        "Python met le realpath du script dans sys.path[0]. "
+        "wgp.py insère aussi os.path.dirname(os.path.abspath(__file__)), "
+        "qui ne résout pas le lien. Sans shared/ffmpeg_setup.py dans ce dossier, "
+        "l'import tombe sur le dossier réel. "
+        "Le processus WanGP a pour cwd le clone : ce realpath ouvre le script du clone. "
+        "Path(__file__).resolve() dans shared/ffmpeg_setup.py préfixe son ffmpeg_bins. "
         "Une libx264.so* trop courte, absente du dossier vu d'ici, donne file too short. "
         "ffmpeg -encoders sans ce préfixe annonce encore libx264. "
         "save_video imprime error saving et le processus quitte avec le code 0, sans MP4. "
@@ -1806,10 +1913,12 @@ def _require_ld_library_shadow(ffmpeg: Path, root: Path | None) -> None:
     traps = _library_traps(entries, needed, scan, root)
     foreign = "" if _same_directory(library_root, root) else _foreign_library_note(library_root, root)
     proc_setup = _proc_setup_note(root)
+    proc_script = _proc_script_note(root, library_root)
     if traps:
         shown = ", ".join(traps)
         raise Wan2GPError(
             proc_setup
+            + proc_script
             + proc_note
             + f"{bundle} contient {shown}, soname chargé par {ffmpeg}. "
             + foreign
@@ -1860,6 +1969,7 @@ def _require_ld_library_shadow(ffmpeg: Path, root: Path | None) -> None:
     shown = ", ".join(sorted(shadows))
     raise Wan2GPError(
         proc_setup
+        + proc_script
         + proc_note
         + "".join(notes)
         + file_note

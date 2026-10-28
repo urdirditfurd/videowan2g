@@ -34,6 +34,17 @@ from src.wan2gp_runner import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Même tête que wgp.py : abspath ne résout pas le lien, realpath est déjà dans sys.path.
+_WGP_IMPORT_PROBE = """\
+import os
+import sys
+p = os.path.dirname(os.path.abspath(__file__))
+if p not in sys.path:
+    sys.path.insert(0, p)
+import shared.ffmpeg_setup as mod
+print(mod.__file__)
+"""
+
 
 class FrameAndResolutionTest(unittest.TestCase):
     def test_frame_count_follows_the_wan_grid(self) -> None:
@@ -732,6 +743,234 @@ class DryRunTest(unittest.TestCase):
                 os.chdir(decoy)
                 setup = root / "shared" / "ffmpeg_setup.py"
                 self.assertEqual(setup.resolve().parents[1], decoy / "nested")
+                env = os.environ.copy()
+                inherited = env.get("LD_LIBRARY_PATH", "")
+                env["LD_LIBRARY_PATH"] = (
+                    str(planted_bins)
+                    if not inherited
+                    else str(planted_bins) + os.pathsep + inherited
+                )
+                decoy_load = subprocess.run(
+                    [system_ffmpeg, "-hide_banner", "-encoders"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=root,
+                    env=env,
+                    timeout=5,
+                )
+                self.assertEqual(decoy_load.returncode, 127, decoy_load.stderr)
+                clean = os.environ.copy()
+                clean_prefix = str(hidden.absolute())
+                inherited = clean.get("LD_LIBRARY_PATH", "")
+                clean["LD_LIBRARY_PATH"] = (
+                    clean_prefix if not inherited else clean_prefix + os.pathsep + inherited
+                )
+                loaded = subprocess.run(
+                    [system_ffmpeg, "-hide_banner", "-encoders"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=root,
+                    env=clean,
+                    timeout=5,
+                )
+                self.assertEqual(loaded.returncode, 0, loaded.stderr)
+                self.assertIn("libx264", loaded.stdout)
+                binaries = wan2gp_runner.require_ffmpeg(root)
+                self.assertEqual(Path(binaries.ffmpeg).resolve(), Path(system_ffmpeg).resolve())
+            finally:
+                os.chdir(previous)
+                _restore_env(saved)
+
+    def test_proc_cwd_wgp_script_library_stops_before_the_gpu(self) -> None:
+        """``sys.path[0]`` de WanGP est le realpath du script, cwd = clone.
+
+        ``wgp.py`` vise ``/proc/self/cwd/nested/wgp.py``,
+        ``/proc/net/../cwd/nested/wgp.py`` ou ``hop1/../cwd/nested/wgp.py``
+        (``hop1`` → ``hop2`` → ``/proc/net``). ``os.path.abspath`` ne résout
+        pas le lien. Sans ``shared`` dans ce dossier, l'import charge
+        ``<clone>/nested/shared``. Depuis le pipeline, ``Path.resolve`` ouvre
+        ce cwd : un leurre rend ``is_file`` vrai, et sans leurre il est faux.
+        ``download_ffmpeg`` préfixe ``<clone>/nested/ffmpeg_bins``. Une
+        ``libx264`` trop courte seulement là sort 127 (``file too short``).
+        ``-encoders`` sans ce préfixe annonce encore libx264.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        soname = _transitive_soname(system_ffmpeg)
+        if soname is None:
+            self.skipTest("soname transitif illisible")
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        shapes = ("self-missing", "proc-net-decoy", "hop-decoy")
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                saved = _saved_env("FFMPEG_BINARY", "FFPROBE_BINARY", "IMAGEIO_FFMPEG_EXE")
+                previous = Path.cwd()
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = base / "wan"
+                    nested = root / "nested"
+                    module = nested / "shared"
+                    module.mkdir(parents=True)
+                    (module / "__init__.py").write_text("", encoding="utf-8")
+                    (module / "ffmpeg_setup.py").write_text("# module du clone\n", encoding="utf-8")
+                    (nested / "wgp.py").write_text(_WGP_IMPORT_PROBE, encoding="utf-8")
+                    hidden = nested / "ffmpeg_bins"
+                    hidden.mkdir()
+                    (hidden / soname).write_bytes(b"short")
+                    if shape == "hop-decoy":
+                        (root / "hop2").symlink_to("/proc/net")
+                        (root / "hop1").symlink_to("hop2")
+                        (root / "wgp.py").symlink_to("hop1/../cwd/nested/wgp.py")
+                    elif shape == "proc-net-decoy":
+                        (root / "wgp.py").symlink_to("/proc/net/../cwd/nested/wgp.py")
+                    elif shape == "self-missing":
+                        (root / "wgp.py").symlink_to("/proc/self/cwd/nested/wgp.py")
+                    else:
+                        self.fail(shape)
+                    decoy = base / "pipeline"
+                    decoy.mkdir()
+                    if shape != "self-missing":
+                        mirror = decoy / "nested"
+                        (mirror / "shared").mkdir(parents=True)
+                        (mirror / "wgp.py").write_text(
+                            "settings_version = 9.99\n",
+                            encoding="utf-8",
+                        )
+                        (mirror / "shared" / "ffmpeg_setup.py").write_text(
+                            "# leurre\n",
+                            encoding="utf-8",
+                        )
+                        (mirror / "ffmpeg_bins").mkdir()
+                    try:
+                        os.chdir(decoy)
+                        script = root / "wgp.py"
+                        self.assertEqual(script.resolve().parent, decoy / "nested")
+                        self.assertNotEqual(script.resolve().parent, nested)
+                        if shape == "self-missing":
+                            self.assertFalse(script.is_file())
+                        else:
+                            self.assertTrue(script.is_file())
+                            self.assertIn(
+                                "9.99",
+                                script.read_text(encoding="utf-8"),
+                            )
+                        loaded = subprocess.run(
+                            [sys.executable, "wgp.py"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            cwd=root,
+                            timeout=5,
+                        )
+                        self.assertEqual(loaded.returncode, 0, loaded.stderr)
+                        self.assertEqual(
+                            Path(loaded.stdout.strip()),
+                            (module / "ffmpeg_setup.py").resolve(),
+                        )
+                        plain = subprocess.run(
+                            [system_ffmpeg, "-hide_banner", "-encoders"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        self.assertEqual(plain.returncode, 0, plain.stderr)
+                        self.assertIn("libx264", plain.stdout)
+                        env = os.environ.copy()
+                        prefix = str(hidden.absolute())
+                        inherited = env.get("LD_LIBRARY_PATH", "")
+                        env["LD_LIBRARY_PATH"] = (
+                            prefix if not inherited else prefix + os.pathsep + inherited
+                        )
+                        shadowed = subprocess.run(
+                            [system_ffmpeg, "-hide_banner", "-encoders"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            cwd=root,
+                            env=env,
+                            timeout=5,
+                        )
+                        self.assertEqual(shadowed.returncode, 127, shadowed.stderr)
+                        self.assertIn("file too short", shadowed.stderr)
+
+                        def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                            raise AssertionError("GPU")
+
+                        with mock.patch(
+                            "src.wan2gp_runner.subprocess.Popen",
+                            side_effect=_popen_except_ffmpeg(refuse_gpu),
+                        ):
+                            with self.assertRaises(Wan2GPError) as caught:
+                                generate(
+                                    GenerationRequest(
+                                        prompt=build_prompt(theme, 61),
+                                        settings=replace(config.wan, root=root),
+                                        output_dir=base / "out",
+                                        aspect="9:16",
+                                        dry_run=False,
+                                    )
+                                )
+                        message = str(caught.exception)
+                        self.assertIn(soname, message)
+                        self.assertIn("wgp.py", message)
+                        self.assertIn("/proc/self", message)
+                        self.assertIn(str(hidden), message)
+                        self.assertIn("LD_LIBRARY_PATH", message)
+                        self.assertIn("file too short", message)
+                        self.assertIn("error saving", message)
+                        self.assertIn("code 0", message)
+                        self.assertIn("sans MP4", message)
+                        self.assertNotIn("introuvable", message)
+                    finally:
+                        os.chdir(previous)
+                        _restore_env(saved)
+
+    def test_proc_cwd_wgp_script_ignores_a_pipeline_library(self) -> None:
+        """Un soname du cwd du pipeline n'est pas le ffmpeg_bins du script.
+
+        Le leurre rend ``Path.resolve`` vrai ici. Le ``nested/ffmpeg_bins``
+        du clone n'a pas ce soname. Le mux du binaire système reste possible.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        soname = _transitive_soname(system_ffmpeg)
+        if soname is None:
+            self.skipTest("soname transitif illisible")
+        saved = _saved_env("FFMPEG_BINARY", "FFPROBE_BINARY", "IMAGEIO_FFMPEG_EXE")
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            nested = root / "nested"
+            module = nested / "shared"
+            module.mkdir(parents=True)
+            (module / "__init__.py").write_text("", encoding="utf-8")
+            (module / "ffmpeg_setup.py").write_text("# module du clone\n", encoding="utf-8")
+            (nested / "wgp.py").write_text(_WGP_IMPORT_PROBE, encoding="utf-8")
+            hidden = nested / "ffmpeg_bins"
+            hidden.mkdir()
+            (root / "wgp.py").symlink_to("/proc/self/cwd/nested/wgp.py")
+            decoy = base / "pipeline"
+            mirror = decoy / "nested"
+            (mirror / "shared").mkdir(parents=True)
+            (mirror / "wgp.py").write_text("# leurre\n", encoding="utf-8")
+            (mirror / "shared" / "ffmpeg_setup.py").write_text("# leurre\n", encoding="utf-8")
+            planted_bins = mirror / "ffmpeg_bins"
+            planted_bins.mkdir()
+            (planted_bins / soname).write_bytes(b"short")
+            try:
+                os.chdir(decoy)
+                script = root / "wgp.py"
+                self.assertTrue(script.is_file())
+                self.assertEqual(script.resolve().parent, mirror)
                 env = os.environ.copy()
                 inherited = env.get("LD_LIBRARY_PATH", "")
                 env["LD_LIBRARY_PATH"] = (
