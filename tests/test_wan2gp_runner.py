@@ -6908,6 +6908,178 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("defaults/t2v_1.3B.json", message)
             self.assertIn("image_outputs", message)
 
+    def test_first_json_architecture_forces_image_outputs(self) -> None:
+        """``init_model_def`` ne voit que le premier JSON.
+
+        Un plugin activé est trié avant ``defaults/``. Son architecture
+        ``chrono_edit`` fait poser ``image_outputs`` par ``query_model_def``
+        sans que la clé soit écrite. Le defaults officiel de ``t2v_1.3B``
+        remet l'architecture mais omet le drapeau : il reste vrai. WanGP
+        force ``image_mode`` à 1, écrit un JPEG et sort 0.
+        """
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            plugin = root / "plugins" / "capy"
+            defs = plugin / "defs"
+            defs.mkdir(parents=True)
+            defaults = root / "defaults"
+            defaults.mkdir()
+            (plugin / "plugin.py").write_text("# plugin\n", encoding="utf-8")
+            (plugin / "plugin_info.json").write_text(
+                json.dumps(
+                    {
+                        "model_handlers": ["capy.models"],
+                        "defaults": "./defs",
+                        "profiles": "./profiles",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (defs / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "chrono_edit", "name": "leurre"}}) + "\n",
+                encoding="utf-8",
+            )
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "name": "Wan2.1 Text2video 1.3B",
+                            "architecture": "t2v_1.3B",
+                            "description": "officiel",
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "wgp_config.json").write_text(
+                json.dumps({"enabled_plugins": ["capy"], "video_container": "mp4"}) + "\n",
+                encoding="utf-8",
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 11),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("image_outputs", message)
+            self.assertIn("JPEG", message)
+            self.assertIn("code 0", message)
+            self.assertIn("chrono_edit", message)
+            self.assertIn("query_model_def", message)
+            self.assertIn("capy", message)
+
+    def test_later_architecture_does_not_recall_query_model_def(self) -> None:
+        """Un finetune après le defaults officiel ne rappelle pas le handler.
+
+        ``init_model_def`` a déjà tourné sur ``t2v_1.3B``. Changer
+        ``architecture`` pour ``chrono_edit`` sans écrire ``image_outputs``
+        ne pose pas le drapeau. WanGP peut encore écrire un MP4.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "chrono_edit"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_explicit_false_clears_a_handler_image_outputs(self) -> None:
+        """Un JSON suivant qui écrit ``image_outputs`` à faux gagne sur le handler."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            plugin = root / "plugins" / "capy"
+            defs = plugin / "defs"
+            defs.mkdir(parents=True)
+            finetunes = root / "finetunes"
+            finetunes.mkdir()
+            (plugin / "plugin.py").write_text("# plugin\n", encoding="utf-8")
+            (plugin / "plugin_info.json").write_text(
+                json.dumps(
+                    {
+                        "model_handlers": ["capy.models"],
+                        "defaults": "./defs",
+                        "profiles": "./profiles",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (defs / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "chrono_edit"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"image_outputs": False, "architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (root / "wgp_config.json").write_text(
+                json.dumps({"enabled_plugins": ["capy"]}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_lone_finetune_architecture_stops_before_the_gpu(self) -> None:
+        """Sans defaults, le finetune est le premier JSON et le handler s'applique."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            finetunes = root / "finetunes"
+            finetunes.mkdir(parents=True)
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "flux"}}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("flux", message)
+            self.assertIn("image_outputs", message)
+            self.assertIn("JPEG", message)
+
+    def test_handler_audio_architecture_stops_before_the_gpu(self) -> None:
+        """``chatterbox`` écrit un fichier audio, pas un MP4, même sans la clé."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "chatterbox", "name": "voix"}}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("audio_only", message)
+            self.assertIn("chatterbox", message)
+            self.assertIn("code 0", message)
+
     def test_mkv_container_stops_before_the_gpu(self) -> None:
         config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
         theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]

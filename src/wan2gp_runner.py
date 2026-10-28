@@ -8,7 +8,10 @@ Le zip contient ``queue.json``. Le modèle est ``t2v_1.3B`` en ``image_mode`` 0.
 ``Fun_InP_1.3B`` (I2V) est refusé : cette famille peut écrire un JPEG et
 quitter avec le code 0, sans vidéo. Une définition ``defaults``,
 ``finetunes`` ou le ``defaults`` d'un plugin activé, pour le même modèle,
-avec ``image_outputs``, a le même effet.
+avec ``image_outputs``, a le même effet. ``init_model_def`` n'est appelé
+que sur le premier JSON : ``query_model_def("chrono_edit")`` pose le
+drapeau même si la clé est absente, et le ``defaults`` officiel de
+``t2v_1.3B`` ne l'efface pas.
 """
 
 from __future__ import annotations
@@ -402,7 +405,15 @@ def require_ffmpeg(
     place avant ``defaults/*.json`` et ``finetunes/*.json``. Le drapeau
     du plugin reste si les fichiers suivants ne réécrivent pas la clé.
     Le ``defaults`` officiel de ``t2v_1.3B`` ne mentionne pas
-    ``image_outputs``. ``defaults`` peut valoir ``/proc/self/cwd/<dossier>`` :
+    ``image_outputs``. ``init_model_def`` ne voit que le premier JSON de
+    ce modèle (le chemin absolu d'un plugin passe avant ``defaults/``).
+    ``query_model_def`` de ``chrono_edit``, de Flux, d'un modèle image,
+    audio, mesh ou world pose le drapeau correspondant même si la clé
+    manque. Un fichier suivant qui change ``architecture`` sans réécrire
+    la clé la laisse vraie : le JPEG, le son, le glb ou le ``.wgpworld``
+    sort quand même, et le CLI quitte avec le code 0. Un fichier qui
+    écrit le drapeau à faux l'efface. ``defaults`` peut valoir
+    ``/proc/self/cwd/<dossier>`` :
     ``glob`` suit le cwd du clone. Un lien ``plugins`` ou
     ``plugin_info.json`` vers ``/proc/self`` a le même effet.
     ``Path.is_file()`` depuis le pipeline lit le leurre, ou ne voit pas
@@ -1241,6 +1252,105 @@ _NON_VIDEO_MODEL_FLAGS = (
 )
 
 
+# Architectures dont query_model_def (WanGP 18.84) met un drapeau non vidéo
+# à vrai sans que le JSON le contienne. init_model_def n'est appelé que
+# pour le premier fichier du modèle. Un JSON suivant ne retire le drapeau
+# que s'il réécrit la clé.
+_HANDLER_FORCED_FLAGS: dict[str, frozenset[str]] = {
+    "chrono_edit": frozenset({"image_outputs"}),
+    "flux": frozenset({"image_outputs"}),
+    "flux2_dev": frozenset({"image_outputs"}),
+    "pi_flux2": frozenset({"image_outputs"}),
+    "flux2_klein_4b": frozenset({"image_outputs"}),
+    "flux2_klein_9b": frozenset({"image_outputs"}),
+    "flux_chroma": frozenset({"image_outputs"}),
+    "flux_chroma_radiance": frozenset({"image_outputs"}),
+    "flux_dev_kontext": frozenset({"image_outputs"}),
+    "flux_dev_umo": frozenset({"image_outputs"}),
+    "flux_dev_uso": frozenset({"image_outputs"}),
+    "flux_schnell": frozenset({"image_outputs"}),
+    "flux_dev_kontext_dreamomni2": frozenset({"image_outputs"}),
+    "flux3_klein": frozenset({"image_outputs"}),
+    "flux3_klein_base": frozenset({"image_outputs"}),
+    "fibo2_dev": frozenset({"image_outputs"}),
+    "fibo2_edit_turbo": frozenset({"image_outputs"}),
+    "hidream_o1": frozenset({"image_outputs"}),
+    "hidream_o1_dev": frozenset({"image_outputs"}),
+    "ideogram4": frozenset({"image_outputs"}),
+    "ideogram4_turbotime": frozenset({"image_outputs"}),
+    "krea2_raw": frozenset({"image_outputs"}),
+    "krea2_turbo": frozenset({"image_outputs"}),
+    "krea2_raw_edit": frozenset({"image_outputs"}),
+    "krea2_turbo_edit": frozenset({"image_outputs"}),
+    "moss_image": frozenset({"image_outputs"}),
+    "ming_image_0_1_design": frozenset({"image_outputs"}),
+    "ming_image_0_1_design_layer": frozenset({"image_outputs"}),
+    "sensenova_u1_5_8b_mot": frozenset({"image_outputs"}),
+    "qwen_image_20B": frozenset({"image_outputs"}),
+    "qwen_image_edit_20B": frozenset({"image_outputs"}),
+    "qwen_image_edit_plus_20B": frozenset({"image_outputs"}),
+    "qwen_image_edit_plus2_20B": frozenset({"image_outputs"}),
+    "qwen_image_layered_20B": frozenset({"image_outputs"}),
+    "qwen_image_21_7B": frozenset({"image_outputs"}),
+    "z_image": frozenset({"image_outputs"}),
+    "z_image_base": frozenset({"image_outputs"}),
+    "z_image_control": frozenset({"image_outputs"}),
+    "z_image_control2": frozenset({"image_outputs"}),
+    "z_image_control2_1": frozenset({"image_outputs"}),
+    "animate_any_mesh": frozenset({"image_outputs", "mesh_outputs"}),
+    "hunyuan3d_21_shape": frozenset({"image_outputs", "mesh_outputs"}),
+    "hunyuan3d_21": frozenset({"image_outputs", "mesh_outputs"}),
+    "moge2": frozenset({"image_outputs", "mesh_outputs"}),
+    "mapanything": frozenset({"image_outputs", "mesh_outputs"}),
+    "da3_points": frozenset({"image_outputs", "mesh_outputs"}),
+    "trellis2": frozenset({"image_outputs", "mesh_outputs"}),
+    "triposg": frozenset({"image_outputs", "mesh_outputs"}),
+    "partcrafter": frozenset({"image_outputs", "mesh_outputs"}),
+    "geosam2": frozenset({"image_outputs", "mesh_outputs"}),
+    "triposplat": frozenset({"image_outputs", "mesh_outputs"}),
+    "worldmirror_2": frozenset({"image_outputs", "mesh_outputs"}),
+    "evoke_turbo": frozenset({"world_outputs"}),
+    "hy_nomas": frozenset({"world_outputs"}),
+    "waypoint_1_5": frozenset({"world_outputs"}),
+    "waypoint_1_5_360p": frozenset({"world_outputs"}),
+    "ace_step_v1": frozenset({"audio_only"}),
+    "ace_step_v1_5": frozenset({"audio_only"}),
+    "ace_step_v1_5_xl": frozenset({"audio_only"}),
+    "auk": frozenset({"audio_only"}),
+    "chatterbox": frozenset({"audio_only"}),
+    "fish_drama3": frozenset({"audio_only"}),
+    "heartmula_oss_3b": frozenset({"audio_only"}),
+    "index_tts2": frozenset({"audio_only"}),
+    "kugelaudio_0_open": frozenset({"audio_only"}),
+    "minimax_music3": frozenset({"audio_only"}),
+    "moss_tts_v1_5": frozenset({"audio_only"}),
+    "moss_tts_local_v1_5": frozenset({"audio_only"}),
+    "omnivoice": frozenset({"audio_only"}),
+    "qwen3_tts_customvoice": frozenset({"audio_only"}),
+    "qwen3_tts_voicedesign": frozenset({"audio_only"}),
+    "qwen3_tts_base": frozenset({"audio_only"}),
+    "stable_audio3_small": frozenset({"audio_only"}),
+    "stable_audio3_medium": frozenset({"audio_only"}),
+    "yue2": frozenset({"audio_only"}),
+    "yue2_hum": frozenset({"audio_only"}),
+    "scenema_audio": frozenset({"audio_only"}),
+    "dramabox_audio": frozenset({"audio_only"}),
+}
+
+
+def _architecture_name(model: dict[str, object], model_type: str) -> str:
+    """Architecture vue par ``init_model_def`` quand la clé manque.
+
+    Le nom du fichier (``t2v_1.3B``) sert de repli, comme
+    ``get_base_model_type`` quand le modèle n'est pas encore enregistré
+    et qu'il fait partie des handlers.
+    """
+    raw = model.get("architecture")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return model_type
+
+
 def _file_opened_from_clone(path: Path, root: Path) -> Path | None:
     """Fichier que ``open`` atteint quand le cwd est le clone.
 
@@ -1605,12 +1715,17 @@ def _require_video_model_definition(root: Path | None, model_type: str) -> None:
     si ``model.image_outputs`` est vrai, puis sort avec le code 0. Le JSON
     est celui que le clone ouvre, y compris le ``defaults`` d'un plugin.
     Un lien ``/proc/self`` ne doit pas faire lire le leurre du pipeline,
-    ni ignorer le fichier du clone.
+    ni ignorer le fichier du clone. Le premier JSON décide aussi de
+    l'architecture passée à ``query_model_def``. Une architecture image,
+    audio, mesh ou world pose le drapeau sans clé. Les fichiers suivants
+    ne le retirent que s'ils l'écrivent.
     """
     if root is None:
         return
     merged: dict[str, object] = {}
     origin: dict[str, str] = {}
+    first_architecture: str | None = None
+    first_where = ""
     for _relative, logical, opened, note in _model_definition_entries(root, model_type):
         try:
             loaded = json.loads(opened.read_text(encoding="utf-8"))
@@ -1636,19 +1751,40 @@ def _require_video_model_definition(root: Path | None, model_type: str) -> None:
         where = _model_def_where(logical, opened)
         if note and "/proc/self" not in where:
             where = f"{where}. {note}"
+        if first_architecture is None:
+            first_architecture = _architecture_name(model, model_type)
+            first_where = where
         for flag, _message in _NON_VIDEO_MODEL_FLAGS:
             if flag in model:
                 origin[flag] = where
         merged.update(model)
+    forced = (
+        _HANDLER_FORCED_FLAGS.get(first_architecture, frozenset())
+        if first_architecture is not None
+        else frozenset()
+    )
     for flag, message in _NON_VIDEO_MODEL_FLAGS:
-        if not merged.get(flag):
+        explicit = flag in origin
+        active = bool(merged.get(flag)) if explicit else flag in forced
+        if not active:
             continue
-        where = origin.get(flag, model_type)
+        if explicit:
+            where = origin[flag]
+            raise Wan2GPError(
+                f"{message} Réglage lu dans {where}. "
+                "Retirer ce drapeau de defaults/, de finetunes/, ou du dossier defaults "
+                "d'un plugin activé, ou reprendre la définition d'origine de "
+                f"{model_type}."
+            )
         raise Wan2GPError(
-            f"{message} Réglage lu dans {where}. "
-            "Retirer ce drapeau de defaults/, de finetunes/, ou du dossier defaults "
-            "d'un plugin activé, ou reprendre la définition d'origine de "
-            f"{model_type}."
+            f"{message} La clé est absente du JSON. query_model_def({first_architecture!r}) "
+            f"la met à vrai dans init_model_def, appelé seulement pour le premier fichier "
+            f"({first_where}). Les JSON suivants ne rappellent pas query_model_def : "
+            "une architecture réécrite sans le drapeau, y compris le defaults officiel "
+            f"de {model_type} qui ne contient pas image_outputs, le laisse vrai. "
+            "process_tasks_cli quitte avec le code 0, sans MP4. "
+            f"Écrire {flag} à faux dans un JSON de {model_type}, ou retirer "
+            f"l'architecture {first_architecture} de ce premier fichier."
         )
 
 
