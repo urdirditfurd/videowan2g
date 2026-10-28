@@ -366,7 +366,16 @@ def require_ffmpeg(root: Path | None = None, python: str | None = None) -> Ffmpe
     est aussi retenu (``Path.exists()``) et copié dans ``FFMPEG_BINARY``.
     ``wgp_config.json`` choisit le conteneur : autre chose que ``mp4`` sort
     un MKV ou un MOV, toujours avec le code 0, et le dossier suivi n'a pas
-    de MP4. Quand le binaire est dans ``ffmpeg_bins``, ``-encoders`` sans
+    de MP4. Ce fichier est ouvert depuis le cwd du clone. Un lien vers
+    ``/proc/self/cwd/secret.json``, ``/proc/net/../cwd/secret.json`` ou
+    ``hop1/../cwd/secret.json`` (``hop1`` → ``hop2`` → ``/proc/net``) suit
+    le cwd du processus. ``Path.is_file()`` ici ouvre le dossier du pipeline :
+    un leurre ``mp4`` laisse passer, ou le fichier du clone n'est pas vu.
+    WanGP lit pourtant le JSON du clone (``mkv``, ou un codec ProRes) et
+    quitte avec le code 0, sans MP4. Un ``mkv`` qui n'existe que dans le
+    dossier du pipeline n'est pas celui que WanGP ouvre : le clone sans ce
+    fichier repart du défaut ``mp4``.
+    Quand le binaire est dans ``ffmpeg_bins``, ``-encoders`` sans
     ``LD_LIBRARY_PATH`` peut encore voir le libx264 du système : une
     ``libavcodec.so*`` du bon soname, vide ou trop courte, à côté du binaire
     casse le chargement dès que WanGP préfixe ce dossier. Le même préfixe
@@ -1117,27 +1126,87 @@ def _require_mp4_container(payload: dict[str, object], where: str) -> None:
     )
 
 
+def _wan_config_file(root: Path) -> Path | None:
+    """``wgp_config.json`` que WanGP ouvre quand le cwd est le clone.
+
+    ``open("wgp_config.json")`` suit ``/proc/self`` de ce processus. Un lien
+    vers ``/proc/self/cwd/secret.json`` n'est pas le fichier que
+    ``Path.is_file()`` voit depuis le pipeline : le leurre y est un ``mp4``,
+    ou le lien est cassé, alors que le clone a un ``mkv``. ``None`` si le
+    clone ne peut pas ouvrir le fichier. WanGP écrit alors la config par
+    défaut, dont le conteneur est ``mp4``.
+    """
+    path = root / "wgp_config.json"
+    try:
+        absolute = str(path.absolute())
+    except OSError:
+        return None
+    if os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        # realpath réussit même si le dernier nom n'existe pas. WanGP ne
+        # lit alors pas de JSON : il écrit la config par défaut (mp4).
+        opened = _realpath_from_cwd(path, root)
+        if opened is None:
+            return None
+        try:
+            if opened.is_file():
+                return opened
+        except OSError:
+            return None
+        return None
+    try:
+        if path.is_file():
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def _config_where(logical: Path | None, opened: Path | None) -> str:
+    """Emplacement cité dans l'erreur, avec le fichier vu par le clone."""
+    if logical is None:
+        return "wgp_config.json"
+    where = str(logical)
+    if opened is None or os.name == "nt":
+        return where
+    try:
+        absolute = str(logical.absolute())
+    except OSError:
+        return where
+    if not _path_depends_on_proc_cwd(absolute):
+        return where
+    return (
+        f"{logical} (ouvert depuis le cwd du clone : {opened}). "
+        "Path.is_file() depuis le pipeline suit /proc/self de ce processus. "
+        "WanGP a pour cwd le clone et lit ce wgp_config.json. "
+        "Un video_container mkv ou mov, ou un codec ProRes, n'écrit pas de MP4 "
+        "et le CLI sort avec le code 0"
+    )
+
+
 def _wan_mp4_target(root: Path | None) -> str:
     """Encodeur ffmpeg exigé par ``wgp_config.json``. Défaut WanGP 18.84 : libx264.
 
     Le conteneur vient du fichier de config du clone, pas de la file. ``mkv``
     ou ``mov`` produit une vidéo que ce pipeline ne peut pas accepter comme MP4.
     Une clé ``video_container`` nulle ou vide non plus : le fichier n'a pas
-    l'extension ``.mp4``.
+    l'extension ``.mp4``. Le JSON lu est celui que ``open`` atteint quand le
+    cwd est le clone. Un lien ``/proc/self`` ne doit pas faire lire le leurre
+    du pipeline, ni ignorer le fichier du clone.
     """
     codec = "libx264_8"
     payload: dict[str, object] = {}
-    config_path = None if root is None else root / "wgp_config.json"
-    if config_path is not None and config_path.is_file():
+    logical = None if root is None else root / "wgp_config.json"
+    opened = None if root is None else _wan_config_file(root)
+    if opened is not None:
         try:
-            loaded = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            loaded = json.loads(opened.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise Wan2GPError(f"wgp_config.json illisible ({config_path}) : {exc}") from exc
+            raise Wan2GPError(f"wgp_config.json illisible ({opened}) : {exc}") from exc
         if not isinstance(loaded, dict):
-            raise Wan2GPError(f"wgp_config.json doit être un objet ({config_path}).")
+            raise Wan2GPError(f"wgp_config.json doit être un objet ({opened}).")
         payload = loaded
         codec = str(payload.get("video_output_codec") or "libx264_8").strip().lower() or "libx264_8"
-    where = "wgp_config.json" if config_path is None else str(config_path)
+    where = _config_where(logical, opened)
     _require_mp4_container(payload, where)
     refused = _NON_MP4_CODECS.get(codec)
     if refused is not None:
