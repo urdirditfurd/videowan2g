@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+output/*
+!output/.gitkeep
+*.mp4
+*.mkv
+*.webm
+*.mov
+.DS_Store
