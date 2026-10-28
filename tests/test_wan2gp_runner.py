@@ -562,6 +562,216 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("error saving", message)
             self.assertIn("code 0", message)
 
+    def test_proc_cwd_ffmpeg_setup_library_stops_before_the_gpu(self) -> None:
+        """``Path(__file__).resolve()`` de WanGP suit le cwd du clone.
+
+        ``shared`` ou ``ffmpeg_setup.py`` vise ``/proc/self/cwd/nested/shared``,
+        ``/proc/net/../cwd/nested/shared``, ou ``hop1/../cwd/nested/shared``
+        (``hop1`` → ``hop2`` → ``/proc/net``). Depuis le pipeline,
+        ``Path.resolve`` ouvre ce cwd, ou ne voit pas le fichier.
+        ``download_ffmpeg`` préfixe ``<clone>/nested/ffmpeg_bins``. Une
+        ``libx264`` trop courte seulement là sort 127 (``file too short``).
+        ``-encoders`` sans ce préfixe annonce encore libx264.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        soname = _transitive_soname(system_ffmpeg)
+        if soname is None:
+            self.skipTest("soname transitif illisible")
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        shapes = ("self-missing", "proc-net-decoy", "hop-decoy", "file-symlink")
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                saved = _saved_env("FFMPEG_BINARY", "FFPROBE_BINARY", "IMAGEIO_FFMPEG_EXE")
+                previous = Path.cwd()
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = base / "wan"
+                    root.mkdir()
+                    (root / "wgp.py").write_text("# faux wan\n", encoding="utf-8")
+                    (root / "ffmpeg").symlink_to(system_ffmpeg)
+                    (root / "ffprobe").symlink_to(system_ffprobe)
+                    nested = root / "nested"
+                    module = nested / "shared"
+                    module.mkdir(parents=True)
+                    (module / "ffmpeg_setup.py").write_text("# module du clone\n", encoding="utf-8")
+                    hidden = nested / "ffmpeg_bins"
+                    hidden.mkdir()
+                    (hidden / soname).write_bytes(b"short")
+                    decoy = base / "pipeline"
+                    decoy.mkdir()
+                    planted = decoy / "ffmpeg"
+                    planted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    planted.chmod(0o755)
+                    if shape == "hop-decoy":
+                        (root / "hop2").symlink_to("/proc/net")
+                        (root / "hop1").symlink_to("hop2")
+                        (root / "shared").symlink_to("hop1/../cwd/nested/shared")
+                    elif shape == "file-symlink":
+                        (root / "shared").mkdir()
+                        (root / "shared" / "ffmpeg_setup.py").symlink_to(
+                            "/proc/self/cwd/nested/shared/ffmpeg_setup.py"
+                        )
+                    elif shape == "self-missing":
+                        (root / "shared").symlink_to("/proc/self/cwd/nested/shared")
+                    elif shape == "proc-net-decoy":
+                        (root / "shared").symlink_to("/proc/net/../cwd/nested/shared")
+                    else:
+                        self.fail(shape)
+                    if shape in {"proc-net-decoy", "hop-decoy"}:
+                        mirror = decoy / "nested" / "shared"
+                        mirror.mkdir(parents=True)
+                        (mirror / "ffmpeg_setup.py").write_text("# leurre\n", encoding="utf-8")
+                        (decoy / "nested" / "ffmpeg_bins").mkdir()
+                    try:
+                        os.chdir(decoy)
+                        setup = root / "shared" / "ffmpeg_setup.py"
+                        if shape in {"self-missing", "file-symlink"}:
+                            self.assertFalse(setup.is_file())
+                        else:
+                            self.assertEqual(setup.resolve().parents[1], decoy / "nested")
+                            self.assertNotEqual(setup.resolve().parents[1], nested)
+                        plain = subprocess.run(
+                            [system_ffmpeg, "-hide_banner", "-encoders"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        self.assertEqual(plain.returncode, 0, plain.stderr)
+                        self.assertIn("libx264", plain.stdout)
+                        env = os.environ.copy()
+                        prefix = str(hidden.absolute())
+                        inherited = env.get("LD_LIBRARY_PATH", "")
+                        env["LD_LIBRARY_PATH"] = (
+                            prefix if not inherited else prefix + os.pathsep + inherited
+                        )
+                        shadowed = subprocess.run(
+                            [system_ffmpeg, "-hide_banner", "-encoders"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            cwd=root,
+                            env=env,
+                            timeout=5,
+                        )
+                        self.assertEqual(shadowed.returncode, 127, shadowed.stderr)
+                        self.assertIn("file too short", shadowed.stderr)
+
+                        def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                            raise AssertionError("GPU")
+
+                        with mock.patch(
+                            "src.wan2gp_runner.subprocess.Popen",
+                            side_effect=_popen_except_ffmpeg(refuse_gpu),
+                        ):
+                            with self.assertRaises(Wan2GPError) as caught:
+                                generate(
+                                    GenerationRequest(
+                                        prompt=build_prompt(theme, 31),
+                                        settings=replace(config.wan, root=root),
+                                        output_dir=base / "out",
+                                        aspect="9:16",
+                                        dry_run=False,
+                                    )
+                                )
+                        message = str(caught.exception)
+                        self.assertIn(soname, message)
+                        self.assertIn("ffmpeg_setup", message)
+                        self.assertIn(str(hidden), message)
+                        self.assertIn("/proc/self", message)
+                        self.assertIn("LD_LIBRARY_PATH", message)
+                        self.assertIn("file too short", message)
+                        self.assertIn("error saving", message)
+                        self.assertIn("sans MP4", message)
+                    finally:
+                        os.chdir(previous)
+                        _restore_env(saved)
+
+    def test_proc_cwd_ffmpeg_setup_ignores_a_pipeline_library(self) -> None:
+        """Un soname du cwd du pipeline n'est pas le ffmpeg_bins de WanGP.
+
+        Le leurre rend ``Path.resolve`` vrai ici. Le clone n'a pas ce
+        soname. Le mux du binaire système reste possible.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        soname = _transitive_soname(system_ffmpeg)
+        if soname is None:
+            self.skipTest("soname transitif illisible")
+        saved = _saved_env("FFMPEG_BINARY", "FFPROBE_BINARY", "IMAGEIO_FFMPEG_EXE")
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("# faux wan\n", encoding="utf-8")
+            (root / "ffmpeg").symlink_to(system_ffmpeg)
+            (root / "ffprobe").symlink_to(system_ffprobe)
+            nested = root / "nested"
+            module = nested / "shared"
+            module.mkdir(parents=True)
+            (module / "ffmpeg_setup.py").write_text("# module du clone\n", encoding="utf-8")
+            hidden = nested / "ffmpeg_bins"
+            hidden.mkdir()
+            (root / "shared").symlink_to("/proc/self/cwd/nested/shared")
+            decoy = base / "pipeline"
+            decoy.mkdir()
+            mirror = decoy / "nested" / "shared"
+            mirror.mkdir(parents=True)
+            (mirror / "ffmpeg_setup.py").write_text("# leurre\n", encoding="utf-8")
+            planted_bins = decoy / "nested" / "ffmpeg_bins"
+            planted_bins.mkdir()
+            (planted_bins / soname).write_bytes(b"short")
+            try:
+                os.chdir(decoy)
+                setup = root / "shared" / "ffmpeg_setup.py"
+                self.assertEqual(setup.resolve().parents[1], decoy / "nested")
+                env = os.environ.copy()
+                inherited = env.get("LD_LIBRARY_PATH", "")
+                env["LD_LIBRARY_PATH"] = (
+                    str(planted_bins)
+                    if not inherited
+                    else str(planted_bins) + os.pathsep + inherited
+                )
+                decoy_load = subprocess.run(
+                    [system_ffmpeg, "-hide_banner", "-encoders"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=root,
+                    env=env,
+                    timeout=5,
+                )
+                self.assertEqual(decoy_load.returncode, 127, decoy_load.stderr)
+                clean = os.environ.copy()
+                clean_prefix = str(hidden.absolute())
+                inherited = clean.get("LD_LIBRARY_PATH", "")
+                clean["LD_LIBRARY_PATH"] = (
+                    clean_prefix if not inherited else clean_prefix + os.pathsep + inherited
+                )
+                loaded = subprocess.run(
+                    [system_ffmpeg, "-hide_banner", "-encoders"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=root,
+                    env=clean,
+                    timeout=5,
+                )
+                self.assertEqual(loaded.returncode, 0, loaded.stderr)
+                self.assertIn("libx264", loaded.stdout)
+                binaries = wan2gp_runner.require_ffmpeg(root)
+                self.assertEqual(Path(binaries.ffmpeg).resolve(), Path(system_ffmpeg).resolve())
+            finally:
+                os.chdir(previous)
+                _restore_env(saved)
+
     def test_local_ffmpeg_bins_are_not_the_wan_library_path(self) -> None:
         """Une bibliothèque à côté du binaire du clone n'est pas celle du module résolu."""
         system_ffmpeg = shutil.which("ffmpeg")

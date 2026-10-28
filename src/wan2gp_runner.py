@@ -441,6 +441,21 @@ def require_ffmpeg(root: Path | None = None, python: str | None = None) -> Ffmpe
     clone. Une ``libx264.so*`` trop courte là-bas casse le chargeur,
     ``-encoders`` sans ce préfixe annonce encore libx264, ``save_video``
     imprime ``error saving`` et le CLI sort 0.
+    Ce ``resolve`` suit ``/proc/self`` du processus qui charge le module.
+    Le contrôle n'a pas le cwd du clone. ``shared`` → ``/proc/self/cwd/nested/shared``,
+    ``/proc/net/../cwd/nested/shared``, ou ``hop1/../cwd/nested/shared``
+    (``hop1`` → ``hop2`` → ``/proc/net``) : ``is_file`` et ``Path.resolve()``
+    ici ouvrent le dossier du pipeline, ou ne voient pas le fichier.
+    Un leurre ``ffmpeg_setup.py`` dans ce cwd fait croire que le préfixe
+    est le sien. Le processus WanGP a pour cwd le clone, donc
+    ``Path(__file__).resolve().parents[1]`` est ``<clone>/nested``.
+    ``download_ffmpeg`` préfixe ``<clone>/nested/ffmpeg_bins``. Une
+    ``libx264.so*`` trop courte seulement là donne ``file too short``,
+    ``-encoders`` sans ce préfixe annonce encore libx264, ``save_video``
+    imprime ``error saving`` et le CLI sort 0, sans MP4. Le même lien sur
+    le fichier ``ffmpeg_setup.py`` (pas sur le dossier ``shared``) a le
+    même effet. Un soname présent seulement dans le cwd du pipeline n'est
+    pas celui que le chargeur ouvre.
     Avant ce téléchargement, ``preload_preferred_libstdcxx``
     (``shared/native_runtime.py``) ajoute le dossier de ``libstdc++.so.6``
     si le processus ne l'a pas encore chargé. Le fichier est cherché dans
@@ -1299,10 +1314,13 @@ def _ffmpeg_library_root(root: Path) -> Path:
     ``sys.path[0]`` est le dossier réel et le module est chargé là. Le cwd du
     processus reste le clone passé au runner : ce n'est pas ce dossier qui
     fournit les bibliothèques.
+    Un lien qui passe par ``/proc/self`` se résout avec ce cwd. ``Path.resolve``
+    dans le contrôle suit le cwd du pipeline et peut viser un autre
+    ``ffmpeg_bins``, ou ignorer le fichier s'il n'existe que dans le clone.
     """
     if os.name == "nt":
         return root
-    resolved = _resolved_ffmpeg_setup(root / "shared" / "ffmpeg_setup.py")
+    resolved = _resolved_ffmpeg_setup(root / "shared" / "ffmpeg_setup.py", root)
     if resolved is not None:
         return resolved
     wgp = root / "wgp.py"
@@ -1316,20 +1334,100 @@ def _ffmpeg_library_root(root: Path) -> Path:
         target = wgp.resolve().parent
     except OSError:
         return root
-    nested = _resolved_ffmpeg_setup(target / "shared" / "ffmpeg_setup.py")
+    nested = _resolved_ffmpeg_setup(target / "shared" / "ffmpeg_setup.py", root)
     if nested is not None:
         return nested
     return target
 
 
-def _resolved_ffmpeg_setup(path: Path) -> Path | None:
-    """Parent du clone réel, ou ``None`` si le module n'est pas un fichier."""
+def _realpath_from_cwd(path: Path, cwd: Path) -> Path | None:
+    """``realpath`` de ``path`` dans un processus dont le cwd est ``cwd``.
+
+    ``/proc/self`` désigne ce processus. ``None`` si le chemin n'existe pas
+    depuis ce cwd. Un délai est une erreur : le même lien bloquerait
+    ``download_ffmpeg``.
+    """
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _LOADER_DIRECTORY, str(path.absolute())],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=_probe_cwd(cwd),
+            timeout=_PATH_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise Wan2GPError(
+            f"{path} ne revient pas quand le cwd est {cwd}. "
+            "Ce lien traverse /proc/self. download_ffmpeg résout "
+            "shared/ffmpeg_setup.py avec le cwd du clone et préfixe un autre "
+            "ffmpeg_bins. save_video imprime error saving et le processus "
+            "quitte avec le code 0, sans MP4."
+        ) from exc
+    if completed.returncode != 0:
+        return None
+    opened = completed.stdout.strip()
+    if not opened:
+        return None
+    return Path(opened)
+
+
+def _resolved_ffmpeg_setup(path: Path, cwd: Path | None = None) -> Path | None:
+    """Parent du clone réel, ou ``None`` si le module n'est pas un fichier.
+
+    ``cwd`` est celui du processus WanGP. Un lien ``shared`` ou
+    ``ffmpeg_setup.py`` vers ``/proc/self/cwd/...`` n'a pas la même cible
+    ici et dans ce processus. ``Path.resolve()`` du contrôle ne suffit pas :
+    il ouvre le dossier du pipeline, y compris quand un leurre rend
+    ``is_file`` vrai.
+    """
+    try:
+        absolute = str(path.absolute())
+    except OSError:
+        return None
+    if cwd is not None and os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        opened = _realpath_from_cwd(path, cwd)
+        if opened is None:
+            return None
+        try:
+            return opened.parents[1]
+        except IndexError:
+            return None
     try:
         if not path.is_symlink() and not path.is_file():
             return None
         return path.resolve().parents[1]
     except (OSError, IndexError):
         return None
+
+
+def _proc_setup_note(root: Path) -> str:
+    """Pourquoi ``Path.resolve`` du contrôle ne voit pas le module de WanGP."""
+    setup = root / "shared" / "ffmpeg_setup.py"
+    try:
+        absolute = str(setup.absolute())
+    except OSError:
+        return ""
+    if not _path_depends_on_proc_cwd(absolute):
+        return ""
+    opened = _realpath_from_cwd(setup, root)
+    if opened is None:
+        located = "un dossier que ce cwd ne voit pas"
+    else:
+        try:
+            located = str(opened.parents[1])
+        except IndexError:
+            located = str(opened)
+    return (
+        f"{setup} suit /proc/self jusqu'au cwd du processus. "
+        f"Path.resolve() depuis le pipeline n'ouvre pas {located}. "
+        "Le processus WanGP a pour cwd le clone : Path(__file__).resolve() "
+        "dans shared/ffmpeg_setup.py retombe sur ce dossier. "
+        "download_ffmpeg préfixe son ffmpeg_bins. "
+        "Une libx264.so* trop courte, absente du dossier vu d'ici, donne file too short. "
+        "ffmpeg -encoders sans ce préfixe annonce encore libx264. "
+        "save_video imprime error saving et le processus quitte avec le code 0, sans MP4. "
+    )
 
 
 def _same_directory(left: Path, right: Path) -> bool:
@@ -1707,10 +1805,12 @@ def _require_ld_library_shadow(ffmpeg: Path, root: Path | None) -> None:
     )
     traps = _library_traps(entries, needed, scan, root)
     foreign = "" if _same_directory(library_root, root) else _foreign_library_note(library_root, root)
+    proc_setup = _proc_setup_note(root)
     if traps:
         shown = ", ".join(traps)
         raise Wan2GPError(
-            proc_note
+            proc_setup
+            + proc_note
             + f"{bundle} contient {shown}, soname chargé par {ffmpeg}. "
             + foreign
             + "Ce n'est pas un fichier : le contrôle des bibliothèques *.so ne le voit pas, "
@@ -1759,7 +1859,8 @@ def _require_ld_library_shadow(ffmpeg: Path, root: Path | None) -> None:
         return
     shown = ", ".join(sorted(shadows))
     raise Wan2GPError(
-        proc_note
+        proc_setup
+        + proc_note
         + "".join(notes)
         + file_note
         + _quarantine_link_note(root)
