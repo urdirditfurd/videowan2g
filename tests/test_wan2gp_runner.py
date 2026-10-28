@@ -6374,6 +6374,192 @@ class DryRunTest(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_proc_cwd_model_def_stops_before_the_gpu(self) -> None:
+        """``defaults`` et ``finetunes`` sont lus depuis le cwd du clone.
+
+        ``image_outputs`` force ``image_mode`` à 1 même si la file demande 0.
+        WanGP écrit un JPEG et sort 0. Un lien vers ``/proc/self`` n'est pas
+        le fichier que ``is_file`` ou ``iterdir`` voient depuis le pipeline.
+        """
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        shapes = (
+            "plain",
+            "file-self",
+            "file-proc-net",
+            "file-hop",
+            "dir-self",
+            "dir-proc-net",
+            "dir-only",
+            "finetune-self",
+            "audio-plain",
+            "mesh-plain",
+            "world-plain",
+        )
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                previous = Path.cwd()
+                with tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    root = base / "wan"
+                    root.mkdir()
+                    (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+                    flag = {
+                        "audio-plain": "audio_only",
+                        "mesh-plain": "mesh_outputs",
+                        "world-plain": "world_outputs",
+                    }.get(shape, "image_outputs")
+                    hidden = json.dumps({"model": {flag: True}}) + "\n"
+                    decoy_text = json.dumps({"model": {flag: False}}) + "\n"
+                    defaults = root / "defaults"
+                    finetunes = root / "finetunes"
+                    if shape in {"plain", "audio-plain", "mesh-plain", "world-plain"}:
+                        defaults.mkdir()
+                        (defaults / "t2v_1.3B.json").write_text(hidden, encoding="utf-8")
+                    elif shape == "file-self":
+                        defaults.mkdir()
+                        (root / "secret.json").write_text(hidden, encoding="utf-8")
+                        (defaults / "t2v_1.3B.json").symlink_to("/proc/self/cwd/secret.json")
+                    elif shape == "file-proc-net":
+                        defaults.mkdir()
+                        (root / "secret.json").write_text(hidden, encoding="utf-8")
+                        (defaults / "t2v_1.3B.json").symlink_to("/proc/net/../cwd/secret.json")
+                    elif shape == "file-hop":
+                        defaults.mkdir()
+                        (defaults / "hop2").symlink_to("/proc/net")
+                        (defaults / "hop1").symlink_to("hop2")
+                        (root / "secret.json").write_text(hidden, encoding="utf-8")
+                        (defaults / "t2v_1.3B.json").symlink_to("hop1/../cwd/secret.json")
+                    elif shape == "dir-self":
+                        (root / "t2v_1.3B.json").write_text(hidden, encoding="utf-8")
+                        defaults.symlink_to("/proc/self/cwd")
+                    elif shape == "dir-proc-net":
+                        (root / "t2v_1.3B.json").write_text(hidden, encoding="utf-8")
+                        defaults.symlink_to("/proc/net/../cwd")
+                    elif shape == "dir-only":
+                        only = root / "only"
+                        only.mkdir()
+                        (only / "t2v_1.3B.json").write_text(hidden, encoding="utf-8")
+                        defaults.symlink_to("/proc/self/cwd/only")
+                    elif shape == "finetune-self":
+                        defaults.mkdir()
+                        (defaults / "t2v_1.3B.json").write_text(
+                            json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                            encoding="utf-8",
+                        )
+                        finetunes.mkdir()
+                        (root / "secret.json").write_text(hidden, encoding="utf-8")
+                        (finetunes / "t2v_1.3B.json").symlink_to("/proc/self/cwd/secret.json")
+                    else:
+                        raise AssertionError(shape)
+                    pipeline = base / "pipeline"
+                    pipeline.mkdir()
+                    if shape in {"file-proc-net", "file-hop", "dir-self", "dir-proc-net"}:
+                        (pipeline / ("t2v_1.3B.json" if shape.startswith("dir-") else "secret.json")).write_text(
+                            decoy_text,
+                            encoding="utf-8",
+                        )
+                    try:
+                        os.chdir(pipeline)
+                        if shape == "file-self":
+                            self.assertFalse((defaults / "t2v_1.3B.json").is_file())
+                        elif shape in {"file-proc-net", "file-hop"}:
+                            seen = (defaults / "t2v_1.3B.json").read_text(encoding="utf-8")
+                            self.assertIn("false", seen)
+                            self.assertNotIn("true", seen)
+                        elif shape in {"dir-self", "dir-proc-net"}:
+                            seen = next(defaults.glob("t2v_1.3B.json")).read_text(encoding="utf-8")
+                            self.assertIn("false", seen)
+                        elif shape == "dir-only":
+                            self.assertFalse((pipeline / "only").exists())
+
+                        def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                            raise AssertionError("GPU")
+
+                        with mock.patch(
+                            "src.wan2gp_runner.subprocess.Popen",
+                            side_effect=_popen_except_ffmpeg(refuse_gpu),
+                        ):
+                            with self.assertRaises(Wan2GPError) as caught:
+                                generate(
+                                    GenerationRequest(
+                                        prompt=build_prompt(theme, 72),
+                                        settings=replace(config.wan, root=root),
+                                        output_dir=base / "out",
+                                        aspect="9:16",
+                                        dry_run=False,
+                                    )
+                                )
+                        message = str(caught.exception)
+                        self.assertIn(flag, message)
+                        self.assertIn("code 0", message)
+                        if shape == "finetune-self":
+                            self.assertIn("finetunes/t2v_1.3B.json", message)
+                        else:
+                            self.assertIn("defaults/t2v_1.3B.json", message)
+                        if flag == "image_outputs":
+                            self.assertIn("JPEG", message)
+                        if shape not in {"plain", "audio-plain", "mesh-plain", "world-plain"}:
+                            self.assertIn("/proc/self", message)
+                        if shape in {"file-self", "file-proc-net", "file-hop", "finetune-self"}:
+                            self.assertIn("secret.json", message)
+                    finally:
+                        os.chdir(previous)
+
+    def test_proc_cwd_model_def_ignores_a_pipeline_image_outputs(self) -> None:
+        """Un ``image_outputs`` du cwd du pipeline n'est pas la définition du clone.
+
+        Le leurre rend ``is_file`` vrai ici. Le clone n'a pas ce fichier.
+        WanGP garde la définition sans le drapeau et peut écrire un MP4.
+        """
+        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffmpeg is None or system_ffprobe is None:
+            self.skipTest("ffmpeg est requis")
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            defaults = root / "defaults"
+            defaults.mkdir()
+            (defaults / "t2v_1.3B.json").symlink_to("/proc/self/cwd/secret.json")
+            pipeline = base / "pipeline"
+            pipeline.mkdir()
+            (pipeline / "secret.json").write_text(
+                json.dumps({"model": {"image_outputs": True}}) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                os.chdir(pipeline)
+                link = defaults / "t2v_1.3B.json"
+                self.assertTrue(link.is_file())
+                self.assertIn("true", link.read_text(encoding="utf-8"))
+                self.assertFalse((root / "secret.json").exists())
+                binaries = wan2gp_runner.require_ffmpeg(root)
+                self.assertEqual(Path(binaries.ffmpeg).resolve(), Path(system_ffmpeg).resolve())
+            finally:
+                os.chdir(previous)
+
+    def test_finetune_can_clear_image_outputs(self) -> None:
+        """Le JSON ``finetunes`` arrive après ``defaults`` et peut retirer le drapeau."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"image_outputs": True, "architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"image_outputs": False}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
     def test_mkv_container_stops_before_the_gpu(self) -> None:
         config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
         theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]

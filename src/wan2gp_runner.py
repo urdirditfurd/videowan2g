@@ -6,7 +6,8 @@ La commande documentée pour vider une file sans interface est :
 
 Le zip contient ``queue.json``. Le modèle est ``t2v_1.3B`` en ``image_mode`` 0.
 ``Fun_InP_1.3B`` (I2V) est refusé : cette famille peut écrire un JPEG et
-quitter avec le code 0, sans vidéo.
+quitter avec le code 0, sans vidéo. Une définition ``defaults`` ou
+``finetunes`` du même modèle avec ``image_outputs`` a le même effet.
 """
 
 from __future__ import annotations
@@ -283,7 +284,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
     if _visible_wan_script(root) is None:
         raise Wan2GPError(f"wgp.py introuvable dans {root}.")
 
-    binaries = require_ffmpeg(root, wan.python or sys.executable)
+    binaries = require_ffmpeg(root, wan.python or sys.executable, model_type)
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
     match wan.backend:
@@ -352,7 +353,11 @@ def resolve_settings_version(root: Path | None) -> float:
     return SETTINGS_VERSION
 
 
-def require_ffmpeg(root: Path | None = None, python: str | None = None) -> FfmpegBinaries:
+def require_ffmpeg(
+    root: Path | None = None,
+    python: str | None = None,
+    model_type: str = "t2v_1.3B",
+) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
     ``download_ffmpeg`` déplace d'abord ``<root>/ffmpeg`` vers ``ffmpeg_quarantine``,
@@ -375,6 +380,19 @@ def require_ffmpeg(root: Path | None = None, python: str | None = None) -> Ffmpe
     quitte avec le code 0, sans MP4. Un ``mkv`` qui n'existe que dans le
     dossier du pipeline n'est pas celui que WanGP ouvre : le clone sans ce
     fichier repart du défaut ``mp4``.
+    ``refresh_model_defs`` charge ``defaults/*.json`` puis ``finetunes/*.json``
+    (triés par ce chemin relatif) pendant que le cwd est le clone. Si le
+    modèle demandé a ``image_outputs``, ``validate_settings`` force
+    ``image_mode`` à 1 même quand la file demande 0, et la tâche écrit un
+    JPEG. ``audio_only``, ``mesh_outputs`` ou ``world_outputs`` écrivent
+    un autre fichier. ``process_tasks_cli`` compte la tâche réussie et sort
+    avec le code 0. Un lien ``defaults/t2v_1.3B.json`` ou le dossier
+    ``defaults`` vers ``/proc/self/cwd``, ``/proc/net/../cwd`` ou
+    ``hop1/../cwd`` (``hop1`` → ``hop2`` → ``/proc/net``) n'est pas le fichier
+    que ``Path.is_file()`` ou ``iterdir`` voient depuis le pipeline. Le
+    leurre y a ``image_outputs`` faux, ou le lien est cassé, alors que le
+    clone a le drapeau vrai. L'inverse, un JSON seulement dans le dossier
+    du pipeline, n'est pas lu : WanGP garde la définition sans ce drapeau.
     Quand le binaire est dans ``ffmpeg_bins``, ``-encoders`` sans
     ``LD_LIBRARY_PATH`` peut encore voir le libx264 du système : une
     ``libavcodec.so*`` du bon soname, vide ou trop courte, à côté du binaire
@@ -641,6 +659,7 @@ def require_ffmpeg(root: Path | None = None, python: str | None = None) -> Ffmpe
     processus dont le cwd est le clone. Un fichier présent seulement dans le
     cwd du pipeline n'est pas celui que le chargeur ouvre.
     """
+    _require_video_model_definition(root, model_type)
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
     ffprobe = _resolve_binary("ffprobe", root)
@@ -1181,6 +1200,182 @@ def _config_where(logical: Path | None, opened: Path | None) -> str:
         "Un video_container mkv ou mov, ou un codec ProRes, n'écrit pas de MP4 "
         "et le CLI sort avec le code 0"
     )
+
+
+_MODEL_DEF_FOLDERS = ("defaults", "finetunes")
+_NON_VIDEO_MODEL_FLAGS = (
+    (
+        "image_outputs",
+        "image_outputs est vrai. WanGP force image_mode à 1 même si la file demande 0 "
+        "(validate_settings). La tâche écrit un JPEG et process_tasks_cli quitte avec le code 0, sans MP4.",
+    ),
+    (
+        "audio_only",
+        "audio_only est vrai. WanGP écrit un fichier audio et process_tasks_cli quitte avec le code 0, sans MP4.",
+    ),
+    (
+        "mesh_outputs",
+        "mesh_outputs est vrai. WanGP écrit un glb ou un ply et process_tasks_cli quitte avec le code 0, sans MP4.",
+    ),
+    (
+        "world_outputs",
+        "world_outputs est vrai. Le world_output par défaut est world : WanGP écrit un .wgpworld "
+        "et process_tasks_cli quitte avec le code 0, sans MP4.",
+    ),
+)
+
+
+def _file_opened_from_clone(path: Path, root: Path) -> Path | None:
+    """Fichier que ``open`` atteint quand le cwd est le clone.
+
+    ``None`` si ce processus ne peut pas ouvrir un fichier. Un lien vers
+    ``/proc/self`` n'a pas la même cible depuis le pipeline.
+    """
+    try:
+        absolute = str(path.absolute())
+    except OSError:
+        return None
+    if os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        opened = _realpath_from_cwd(path, root)
+        if opened is None:
+            return None
+        try:
+            if opened.is_file():
+                return opened
+        except OSError:
+            return None
+        return None
+    try:
+        if path.is_file():
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def _directory_opened_from_clone(path: Path, root: Path) -> Path | None:
+    """Dossier que ``glob`` parcourt quand le cwd est le clone.
+
+    ``None`` si ce processus n'ouvre pas un dossier. ``defaults`` vers
+    ``/proc/self/cwd`` liste la racine du clone, pas le cwd du pipeline.
+    """
+    try:
+        absolute = str(path.absolute())
+    except OSError:
+        return None
+    if os.name != "nt" and _path_depends_on_proc_cwd(absolute):
+        opened = _realpath_from_cwd(path, root)
+        if opened is None:
+            return None
+        try:
+            if opened.is_dir():
+                return opened
+        except OSError:
+            return None
+        return None
+    try:
+        if path.is_dir():
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def _model_def_where(logical: Path, opened: Path) -> str:
+    """Emplacement cité, avec le JSON vu par le clone si ``/proc/self`` s'en mêle."""
+    where = str(logical)
+    try:
+        absolute = str(logical.absolute())
+    except OSError:
+        return where
+    if os.name == "nt" or not _path_depends_on_proc_cwd(absolute):
+        return where
+    return (
+        f"{logical} (ouvert depuis le cwd du clone : {opened}). "
+        "iterdir et Path.is_file() depuis le pipeline suivent /proc/self de ce processus. "
+        "WanGP a pour cwd le clone et lit ce JSON. "
+        "Un image_outputs vrai force image_mode à 1 : un JPEG est écrit "
+        "et le CLI sort avec le code 0"
+    )
+
+
+def _model_definition_entries(root: Path, model_type: str) -> list[tuple[str, Path, Path]]:
+    """``(chemin relatif, chemin logique, fichier ouvert)`` dans l'ordre de WanGP.
+
+    ``refresh_model_defs`` trie ``defaults/<nom>.json`` et
+    ``finetunes/<nom>.json`` ensemble. Le second met à jour le premier.
+    Seul le modèle demandé est lu : un autre JSON ne change pas ``image_mode``.
+    """
+    found: list[tuple[str, Path, Path]] = []
+    for folder in _MODEL_DEF_FOLDERS:
+        logical_dir = root / folder
+        opened_dir = _directory_opened_from_clone(logical_dir, root)
+        if opened_dir is None:
+            continue
+        try:
+            names = [item.name for item in opened_dir.iterdir()]
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".json") or Path(name).stem != model_type:
+                continue
+            logical = logical_dir / name
+            opened = _file_opened_from_clone(logical, root)
+            if opened is None:
+                continue
+            found.append((f"{folder}/{name}", logical, opened))
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def _require_video_model_definition(root: Path | None, model_type: str) -> None:
+    """Refuse une définition qui fait écrire autre chose qu'un MP4.
+
+    La file de ce pipeline met ``image_mode`` à 0. WanGP 18.84 repasse à 1
+    si ``model.image_outputs`` est vrai, puis sort avec le code 0. Le JSON
+    est celui que le clone ouvre. Un lien ``/proc/self`` ne doit pas faire
+    lire le leurre du pipeline, ni ignorer le fichier du clone.
+    """
+    if root is None:
+        return
+    merged: dict[str, object] = {}
+    origin: dict[str, str] = {}
+    for _relative, logical, opened in _model_definition_entries(root, model_type):
+        try:
+            loaded = json.loads(opened.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            if _relative.startswith("finetunes/"):
+                continue
+            raise Wan2GPError(
+                f"Définition {_relative} illisible ({opened}) : {exc}. "
+                "WanGP interrompt le chargement de defaults/*.json et ne produit pas de MP4."
+            ) from exc
+        if not isinstance(loaded, dict):
+            if _relative.startswith("finetunes/"):
+                continue
+            raise Wan2GPError(f"Définition {_relative} doit être un objet ({opened}).")
+        model = loaded.get("model")
+        if not isinstance(model, dict):
+            if _relative.startswith("finetunes/"):
+                continue
+            raise Wan2GPError(
+                f"Définition {_relative} n'a pas d'objet model ({opened}). "
+                "WanGP lève une exception au chargement et ne produit pas de MP4."
+            )
+        where = _model_def_where(logical, opened)
+        for flag, _message in _NON_VIDEO_MODEL_FLAGS:
+            if flag in model:
+                origin[flag] = where
+        merged.update(model)
+    for flag, message in _NON_VIDEO_MODEL_FLAGS:
+        if not merged.get(flag):
+            continue
+        where = origin.get(flag, model_type)
+        raise Wan2GPError(
+            f"{message} Réglage lu dans {where}. "
+            "Retirer ce drapeau de defaults/ ou finetunes/, ou reprendre la définition d'origine de "
+            f"{model_type}."
+        )
 
 
 def _wan_mp4_target(root: Path | None) -> str:
@@ -3519,7 +3714,8 @@ def _require_mp4(directory: Path, before: dict[Path, int], ffprobe: str, log_pat
         kind = "JPEG" if any(name.lower().endswith((".jpg", ".jpeg")) for name in images) else "image"
         details.append(
             f"Wan2GP a écrit un {kind} ({', '.join(images)}) à la place d'une vidéo. "
-            "Ce comportement est celui de Fun_InP_1.3B en I2V, ou d'un image_mode différent de 0."
+            "Ce comportement est celui de Fun_InP_1.3B en I2V, d'un image_mode différent de 0, "
+            "ou d'une définition defaults/finetunes dont image_outputs est vrai."
         )
     if rejected:
         details.append("Fichiers .mp4 illisibles comme vidéo : " + "; ".join(rejected) + ".")
