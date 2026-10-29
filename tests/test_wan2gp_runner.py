@@ -8846,6 +8846,319 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("at most 1", message)
             self.assertIn("code 0", message)
 
+    def test_h3_window_min_rejects_ti2v_size(self) -> None:
+        """MiniMax pose window_min à 124. ti2v_2_2 laisse la taille à 121."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "ti2v_2_2"}}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("ti2v_2_2", message)
+            self.assertIn("sliding_window_size", message)
+            self.assertIn("121", message)
+            self.assertIn("at least 124", message)
+            self.assertIn("code 0", message)
+
+    def test_h3_finetune_does_not_inject_window_min(self) -> None:
+        """query_model_def ne tourne pas pour le finetune MiniMax."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_h3_then_t2v_size_stays_inside_the_window(self) -> None:
+        """129 est entre 124 et 481. Le finetune t2v_1.3B ne change pas la taille."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_h3_factory_size_stays_inside_its_window(self) -> None:
+        """MiniMax pose la taille à 362, sous son window_max 481."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_explicit_window_min_is_skipped(self) -> None:
+        """Un JSON qui pose window_min à 200 saute avec la taille 129."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                            "sliding_window_defaults": {"window_min": 200},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("JSON", message)
+            self.assertIn("129", message)
+            self.assertIn("at least 200", message)
+
+    def test_explicit_window_max_is_skipped(self) -> None:
+        """Un JSON qui pose window_max à 80 saute avec la taille 129."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                            "sliding_window_defaults": {"window_max": 80},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 80", message)
+            self.assertIn("129", message)
+
+    def test_sliding_window_off_ignores_window_min(self) -> None:
+        """sliding_window faux retire le contrôle de la taille."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": False,
+                            "sliding_window_defaults": {"window_min": 200},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_settings_size_inside_window_min_keeps_a_video(self) -> None:
+        """Une taille écrite dans le JSON, dans la borne, reste acceptée."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                            "sliding_window_defaults": {"window_min": 200},
+                        },
+                        "sliding_window_size": 200,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_queue_size_inside_h3_window_keeps_ti2v(self) -> None:
+        """La file à 200 remplace les 121 de ti2v_2_2."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "ti2v_2_2"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_sliding_window_size=200,
+            )
+
+    def test_frames_multiplier_widens_window_max(self) -> None:
+        """get_max_frames élargit window_max. 129 passe sous un plafond de 80."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (root / "wgp_config.json").write_text(
+                json.dumps({"max_frames_multiplier": 2, "video_container": "mp4"}) + "\n",
+                encoding="utf-8",
+            )
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                            "sliding_window_defaults": {"window_max": 80},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_h3_size_without_injected_bounds_is_skipped(self) -> None:
+        """sliding_window vrai sans bornes injectées : 362 dépasse 257."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "minimax_h3_ref2va",
+                            "sliding_window": True,
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("362", message)
+            self.assertIn("at most 257", message)
+
+    def test_non_integer_window_size_is_skipped(self) -> None:
+        """Une taille qui n'est pas un entier saute avant le GPU."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                        },
+                        "sliding_window_size": "large",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("must be an integer", message)
+            self.assertIn("code 0", message)
+
+    def test_h3_window_min_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand la taille MiniMax est hors borne."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir()
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "minimax_h3_ref2va", "name": "H3"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "ti2v_2_2", "name": "TI2V"}}) + "\n",
+                encoding="utf-8",
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("121", message)
+            self.assertIn("at least 124", message)
+            self.assertIn("code 0", message)
+
 
 def _saved_env(*keys: str) -> dict[str, str | None]:
     return {key: os.environ.get(key) for key in keys}

@@ -48,7 +48,12 @@ laisse ``sliding_window_overlap`` à 5, et ``update_default_settings``
 d'Ovi ne le rabaisse pas. ``extra_settings.validate_inputs`` refuse
 cette valeur. La tâche est sautée et le CLI sort 0, sans MP4.
 ``init_model_def`` n'est appelé que pour le premier JSON : un finetune
-qui change l'architecture ne retire pas ce plafond.
+qui change l'architecture ne retire pas ce plafond. Le même validateur
+refuse ``sliding_window_size`` avant le recouvrement. MiniMax H3
+(``minimax_h3_ref2va`` et la famille) pose ``window_min`` à 124.
+``ti2v_2_2`` laisse la taille à 121 : la tâche est sautée et le CLI
+sort 0, sans MP4. Un JSON qui écrit ``window_min`` ou ``window_max``
+hors de la taille d'usine fait pareil.
 """
 
 from __future__ import annotations
@@ -346,6 +351,11 @@ def generate(request: GenerationRequest) -> GenerationResult:
         if "sliding_window_overlap" in payload
         else _QUEUE_MODEL_MODE_UNSET
     )
+    queue_sliding_window_size = (
+        payload["sliding_window_size"]
+        if "sliding_window_size" in payload
+        else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -359,6 +369,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_audio_guide=queue_audio_guide,
         queue_custom_guide=queue_custom_guide,
         queue_sliding_window_overlap=queue_sliding_window_overlap,
+        queue_sliding_window_size=queue_sliding_window_size,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -441,6 +452,7 @@ def require_ffmpeg(
     queue_audio_guide: object = _QUEUE_MODEL_MODE_UNSET,
     queue_custom_guide: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sliding_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_sliding_window_size: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -807,6 +819,7 @@ def require_ffmpeg(
         queue_audio_guide,
         queue_custom_guide,
         queue_sliding_window_overlap,
+        queue_sliding_window_size,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -2741,6 +2754,7 @@ def _require_video_model_definition(
     queue_audio_guide: object = _QUEUE_MODEL_MODE_UNSET,
     queue_custom_guide: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sliding_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_sliding_window_size: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -2777,6 +2791,11 @@ def _require_video_model_definition(
     Le défaut ``sliding_window_overlap`` reste 5. ``extra_settings`` refuse
     la valeur, la tâche est sautée et le CLI sort 0. Un JSON suivant qui
     change l'architecture ne retire pas ce plafond.
+    Le même validateur refuse ``sliding_window_size`` avant ce recouvrement.
+    MiniMax H3 pose ``window_min`` à 124. L'architecture finale
+    ``ti2v_2_2`` laisse la taille à 121 : la tâche est sautée et le CLI
+    sort 0. Un JSON qui écrit ``window_min`` ou ``window_max`` hors de
+    la taille retenue fait pareil.
     """
     if root is None:
         return
@@ -2948,6 +2967,18 @@ def _require_video_model_definition(
         sliding_window_explicit,
         sliding_defaults_explicit,
         queue_sliding_window_overlap,
+    )
+    _require_sliding_size(
+        root,
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_where,
+        architecture_where,
+        sliding_window_explicit,
+        sliding_defaults_explicit,
+        queue_sliding_window_size,
     )
 
 
@@ -3141,6 +3172,243 @@ def _require_sliding_overlap(
         f"Architecture finale {architecture}, lue dans {shown}. "
         "Poser sliding_window_overlap dans la borne, écrire sliding_window à faux, "
         "ou relever overlap_max."
+    )
+
+
+_PRIMARY_SLIDING_SIZE = 129
+_DEFAULT_WINDOW_MIN = 5
+_DEFAULT_WINDOW_MAX = 257
+
+# query_model_def de MiniMax H3 (WanGP 18.84). window_min reste 124.
+# Le contrôle et Viggle ne changent que window_max.
+_H3_WINDOW_BOUNDS: dict[str, tuple[int, int]] = {
+    "minimax_h3_fl2va": (124, 481),
+    "minimax_h3_fl2va_pruned": (124, 481),
+    "minimax_h3_ref2va": (124, 481),
+    "minimax_h3_ref2va_pruned": (124, 481),
+    "minimax_h3_control": (124, 362),
+    "minimax_h3_control_pruned": (124, 362),
+    "viggle_animate": (124, 124),
+}
+
+# Architectures dont le premier query_model_def pose sliding_window sans
+# window_min ni window_max. extra_settings retombe alors sur 5 et 257.
+_SLIDING_WINDOW_INJECTED = (
+    frozenset(
+        {
+            "ovi",
+            "t2v",
+            "t2v_2_2",
+            "lynx",
+            "ti2v_2_2",
+            "lucy_edit",
+            "kiwi_edit",
+        }
+    )
+    | _WAN_I2V
+    | _WAN_VACE
+    | frozenset(_H3_WINDOW_BOUNDS)
+)
+
+_H3_FACTORY_SIZE = frozenset(
+    {
+        "minimax_h3_fl2va",
+        "minimax_h3_fl2va_pruned",
+        "minimax_h3_ref2va",
+        "minimax_h3_ref2va_pruned",
+        "minimax_h3_control",
+        "minimax_h3_control_pruned",
+    }
+)
+
+
+def _factory_sliding_size(architecture: str) -> int:
+    """``sliding_window_size`` après ``update_default_settings``.
+
+    ``models/_settings.json`` part de 129. Le handler de l'architecture
+    finale peut le remplacer. MiniMax le passe à 362, Viggle à 124,
+    Wan 5B et Ovi à 121.
+    """
+    if architecture == "infinitetalk":
+        return 81
+    if architecture == "animate2":
+        return 65
+    if architecture in {"scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro"}:
+        return 81
+    if architecture in {"ti2v_2_2", "lucy_edit", "kiwi_edit", "ovi"}:
+        return 121
+    if architecture == "viggle_animate":
+        return 124
+    if architecture in _H3_FACTORY_SIZE:
+        return 362
+    return _PRIMARY_SLIDING_SIZE
+
+
+def _max_frames_multiplier(root: Path | None) -> int:
+    """``get_max_frames`` de WanGP. Défaut 1 : ``window_max`` ne change pas."""
+    if root is None:
+        return 1
+    opened = _wan_config_file(root)
+    if opened is None:
+        return 1
+    try:
+        loaded = json.loads(opened.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 1
+    if not isinstance(loaded, dict):
+        return 1
+    raw = loaded.get("max_frames_multiplier", 1)
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return max(1, value)
+
+
+def _sliding_size_enabled(
+    merged: dict[str, object],
+    sliding_window_explicit: bool,
+    first_architecture: str | None,
+) -> bool:
+    """``sliding_window`` vu par ``extra_settings`` après ``init_model_def``."""
+    if sliding_window_explicit:
+        return bool(merged.get("sliding_window"))
+    return first_architecture in _SLIDING_WINDOW_INJECTED
+
+
+def _window_bounds(
+    merged: dict[str, object],
+    sliding_defaults_explicit: bool,
+    first_architecture: str | None,
+) -> tuple[int, int, str]:
+    """``window_min`` / ``window_max`` avant ``get_max_frames``."""
+    if sliding_defaults_explicit:
+        raw_defaults = merged.get("sliding_window_defaults")
+        defaults = raw_defaults if isinstance(raw_defaults, dict) else {}
+        window_min = _overlap_bound(defaults.get("window_min", _DEFAULT_WINDOW_MIN), _DEFAULT_WINDOW_MIN)
+        window_max = _overlap_bound(defaults.get("window_max", _DEFAULT_WINDOW_MAX), _DEFAULT_WINDOW_MAX)
+        return window_min, window_max, "Les bornes viennent du JSON (sliding_window_defaults)."
+    injected = None if first_architecture is None else _H3_WINDOW_BOUNDS.get(first_architecture)
+    if injected is not None:
+        window_min, window_max = injected
+        return (
+            window_min,
+            window_max,
+            f"query_model_def({first_architecture!r}) pose window_min {window_min} et "
+            f"window_max {window_max}. init_model_def n'est appelé que pour ce premier fichier. "
+            "Un JSON suivant qui change l'architecture ne retire pas ces bornes.",
+        )
+    return (
+        _DEFAULT_WINDOW_MIN,
+        _DEFAULT_WINDOW_MAX,
+        "Sans sliding_window_defaults, extra_settings part de window_min 5 et window_max 257.",
+    )
+
+
+def _require_sliding_size(
+    root: Path | None,
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_where: str,
+    architecture_where: str,
+    sliding_window_explicit: bool,
+    sliding_defaults_explicit: bool,
+    queue_sliding_window_size: object,
+) -> None:
+    """Refuse une taille de fenêtre hors de ``window_min`` / ``window_max``.
+
+    ``extra_settings.validate_inputs`` contrôle ``sliding_window_size``
+    avant ``sliding_window_overlap``. MiniMax H3 pose ``window_min`` à 124.
+    ``update_default_settings`` de ``ti2v_2_2`` laisse la taille à 121.
+    La tâche est sautée, ``process_tasks_cli`` sort 0, sans MP4.
+    ``get_max_frames`` n'élargit que la borne haute.
+    """
+    if not _sliding_size_enabled(merged, sliding_window_explicit, first_architecture):
+        return
+    window_min, window_max, bounds_note = _window_bounds(
+        merged,
+        sliding_defaults_explicit,
+        first_architecture,
+    )
+    multiplier = _max_frames_multiplier(root)
+    widened_max = (window_max - 1) * multiplier + 1
+    if multiplier != 1:
+        bounds_note += (
+            f" get_max_frames élargit window_max avec max_frames_multiplier {multiplier} : "
+            f"la borne haute devient {widened_max}."
+        )
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    if (
+        queue_sliding_window_size is not _QUEUE_MODEL_MODE_UNSET
+        and queue_sliding_window_size is not None
+    ):
+        raw_size: object = queue_sliding_window_size
+        size_note = "La file envoie sliding_window_size."
+    elif "sliding_window_size" in settings:
+        raw_size = settings["sliding_window_size"]
+        size_note = "Le JSON de réglages envoie sliding_window_size."
+    else:
+        raw_size = _factory_sliding_size(architecture)
+        if architecture == "ti2v_2_2":
+            size_note = (
+                "update_default_settings de ti2v_2_2 (test_wan_5B) pose "
+                f"sliding_window_size à {raw_size}. models/_settings.json part de 129."
+            )
+        elif architecture in _H3_FACTORY_SIZE:
+            size_note = (
+                "update_default_settings de MiniMax pose "
+                f"sliding_window_size à {raw_size}. models/_settings.json part de 129."
+            )
+        elif architecture == "ovi":
+            size_note = (
+                "update_default_settings d'ovi pose "
+                f"sliding_window_size à {raw_size}. models/_settings.json part de 129."
+            )
+        else:
+            size_note = (
+                f"update_default_settings de {architecture} laisse sliding_window_size "
+                f"à {raw_size}. models/_settings.json part de 129."
+            )
+    shown = architecture_where or first_where or model_type
+    if _overlap_is_rejected(raw_size):
+        kind = "a integer" if isinstance(raw_size, bool) else "an integer"
+        raise Wan2GPError(
+            "La tâche est sautée avant toute vidéo. sliding_window est vrai et "
+            f"sliding_window_size vaut {raw_size!r}, qui n'est pas un entier. "
+            "extra_settings.validate_inputs (shared/extra_settings.py) renvoie une erreur "
+            f"(Sliding Window Size must be {kind}). "
+            "validate_settings la propage avant sliding_window_overlap. "
+            "process_tasks_cli compte la tâche comme sautée et quitte avec le code 0, "
+            "sans MP4. "
+            f"{size_note} {bounds_note} "
+            f"Architecture finale {architecture}, lue dans {shown}."
+        )
+    size = _sliding_overlap_number(raw_size)
+    if size is None:
+        return
+    if window_min <= size <= widened_max:
+        return
+    if size > widened_max:
+        limit = f"au-dessus de {widened_max}"
+        wan_message = f"must be at most {widened_max}"
+    else:
+        limit = f"en dessous de {window_min}"
+        wan_message = f"must be at least {window_min}"
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. sliding_window est vrai et "
+        f"sliding_window_size vaut {size}, {limit}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py) refuse la valeur "
+        f"(Sliding Window Size {wan_message}) avant sliding_window_overlap. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        f"{size_note} {bounds_note} "
+        f"Architecture finale {architecture}, lue dans {shown}. "
+        "Poser sliding_window_size dans la borne, écrire sliding_window à faux, "
+        "ou élargir window_min et window_max."
     )
 
 
