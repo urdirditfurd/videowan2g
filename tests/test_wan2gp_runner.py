@@ -7068,7 +7068,11 @@ class DryRunTest(unittest.TestCase):
             (defaults / "t2v_1.3B.json").write_text(
                 json.dumps(
                     {
-                        "model": {"architecture": "chrono_edit", "image_outputs": False},
+                        "model": {
+                            "architecture": "chrono_edit",
+                            "image_outputs": False,
+                            "image_prompt_types_allowed": "",
+                        },
                         "model_mode": 0,
                     }
                 )
@@ -7147,6 +7151,7 @@ class DryRunTest(unittest.TestCase):
                         "model": {
                             "architecture": "chrono_edit",
                             "image_outputs": False,
+                            "image_prompt_types_allowed": "",
                             "model_modes": {"image_modes": [0]},
                         },
                         "model_mode": 2,
@@ -8006,6 +8011,182 @@ class DryRunTest(unittest.TestCase):
             message = str(caught.exception)
             self.assertIn("injecte", message)
             self.assertIn("qwen_image_21_7B", message)
+            self.assertIn("code 0", message)
+
+    def test_fun_inp_start_image_is_skipped(self) -> None:
+        """``fun_inp_1.3B`` injecte ``SEVL`` et exige une image de départ.
+
+        ``update_default_settings`` pose ``image_prompt_type`` à ``S``.
+        La file n'a pas d'image. ``validate_settings`` échoue, la tâche est
+        sautée et ``process_tasks_cli`` sort 0, sans MP4. ``image_outputs``
+        n'est pas posé : le drapeau ne suffit pas à voir l'échec.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "fun_inp_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("fun_inp_1.3B", message)
+            self.assertIn("image_prompt_type", message)
+            self.assertIn("SEVL", message)
+            self.assertIn("sautée", message)
+            self.assertIn("code 0", message)
+            self.assertIn("query_model_def", message)
+            self.assertNotIn("image_outputs", message)
+
+    def test_chrono_injected_start_image_skips_model_mode_two(self) -> None:
+        """``model_mode`` 2 n'écrit pas de vidéo si l'image de départ manque.
+
+        Chrono est le premier JSON : ``query_model_def`` injecte ``SEVL``
+        sans ``black_frame``. La validation saute avant
+        ``validate_generative_settings``.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "chrono_edit", "image_outputs": False},
+                        "model_mode": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("chrono_edit", message)
+            self.assertIn("SEVL", message)
+            self.assertIn("sautée", message)
+            self.assertIn("code 0", message)
+
+    def test_empty_prompt_types_keep_chrono_model_mode_two(self) -> None:
+        """Sans ``S`` dans les types autorisés, ``model_mode`` 2 écrit une vidéo."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "chrono_edit",
+                            "image_outputs": False,
+                            "image_prompt_types_allowed": "",
+                        },
+                        "model_mode": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_settings_clear_the_injected_start_image(self) -> None:
+        """Un ``image_prompt_type`` vide dans les réglages gagne sur le ``S``."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "fun_inp_1.3B"},
+                        "image_prompt_type": "",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_i2v_black_frame_is_not_a_skipped_task(self) -> None:
+        """``black_frame`` fabrique l'image manquante : la tâche n'est pas sautée."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "i2v"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_later_fun_inp_without_s_is_not_skipped(self) -> None:
+        """Le premier ``t2v_1.3B`` injecte une chaîne sans ``S``.
+
+        Le finetune passe à ``fun_inp_1.3B`` sans réécrire la clé.
+        ``update_default_settings`` ne pose pas ``S``.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "t2v_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps({"model": {"architecture": "fun_inp_1.3B"}}) + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_fun_inp_start_image_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand Fun InP saute la tâche."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            defaults = root / "defaults"
+            defaults.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "name": "Wan2.1 Text2video 1.3B",
+                            "architecture": "fun_inp_1.3B",
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 11),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("fun_inp_1.3B", message)
+            self.assertIn("SEVL", message)
             self.assertIn("code 0", message)
 
 

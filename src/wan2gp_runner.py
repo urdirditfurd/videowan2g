@@ -23,7 +23,13 @@ fait la même chose pour toute file en ``image_mode`` 0, que la clé
 suivant qui passe à ``chrono_edit``, met ``image_outputs`` à faux et
 ``model_mode`` à 2, sans réécrire ``model_modes``, laisse cette liste :
 ``0`` n'y est pas, ``model_mode`` devient None, Chrono Edit écrit un
-JPEG et le CLI sort 0.
+JPEG et le CLI sort 0. Pour une architecture I2V finale
+(``fun_inp_1.3B``, ``chrono_edit``, …), ``update_default_settings`` pose
+aussi ``image_prompt_type`` à ``S`` quand ``image_prompt_types_allowed``
+contient ``S``. Cette chaîne est injectée par ``query_model_def`` du
+premier JSON si la clé manque (``SEVL`` pour Fun InP et Chrono). Sans
+image de départ, et sans ``black_frame``, ``validate_settings`` renvoie
+une erreur : la tâche est sautée, ``process_tasks_cli`` sort 0, sans MP4.
 """
 
 from __future__ import annotations
@@ -303,11 +309,15 @@ def generate(request: GenerationRequest) -> GenerationResult:
         raise Wan2GPError(f"wgp.py introuvable dans {root}.")
 
     queue_model_mode = payload["model_mode"] if "model_mode" in payload else _QUEUE_MODEL_MODE_UNSET
+    queue_image_prompt_type = (
+        payload["image_prompt_type"] if "image_prompt_type" in payload else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
         model_type,
         queue_model_mode=queue_model_mode,
+        queue_image_prompt_type=queue_image_prompt_type,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -382,6 +392,7 @@ def require_ffmpeg(
     python: str | None = None,
     model_type: str = "t2v_1.3B",
     queue_model_mode: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_image_prompt_type: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -736,7 +747,12 @@ def require_ffmpeg(
     processus dont le cwd est le clone. Un fichier présent seulement dans le
     cwd du pipeline n'est pas celui que le chargeur ouvre.
     """
-    _require_video_model_definition(root, model_type, queue_model_mode)
+    _require_video_model_definition(
+        root,
+        model_type,
+        queue_model_mode,
+        queue_image_prompt_type,
+    )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
     ffprobe = _resolve_binary("ffprobe", root)
@@ -1405,6 +1421,133 @@ _FIX_SETTINGS_FORCED_IMAGE = frozenset({"qwen_image_21_7B"})
 # ``model_modes``. ``flux_chroma``, ``flux_chroma_radiance``,
 # ``flux_dev_umo``, ``flux_dev_uso`` et ``flux_dev_kontext_dreamomni2``
 # non plus. ``qwen_image_layered_20B`` non plus.
+# ``test_class_i2v`` de models/wan/wan_handler.py (WanGP 18.84).
+_WAN_I2V = frozenset(
+    {
+        "i2v",
+        "i2v_2_2",
+        "fun_inp_1.3B",
+        "fun_inp",
+        "flf2v_720p",
+        "fantasy",
+        "multitalk",
+        "infinitetalk",
+        "i2v_2_2_multitalk",
+        "animate",
+        "animate2",
+        "chrono_edit",
+        "steadydancer",
+        "wanmove",
+        "scail",
+        "scail2_14B",
+        "scail2_1.3B",
+        "i2v_2_2_svi2pro",
+        "fun_camera_1.3B",
+        "uni3c",
+    }
+)
+
+# Architectures dont query_model_def pose ``black_frame``. Une image noire
+# remplace alors l'image de départ manquante : la validation ne saute pas.
+_WAN_BLACK_FRAME = frozenset(
+    {
+        "i2v",
+        "flf2v_720p",
+        "i2v_2_2",
+        "i2v_2_2_multitalk",
+        "i2v_2_2_svi2pro",
+    }
+)
+
+_WAN_VACE = frozenset(
+    {
+        "vace_14B",
+        "vace_14B_2_2",
+        "vace_1.3B",
+        "vace_multitalk_14B",
+        "vace_standin_14B",
+        "vace_lynx_14B",
+        "vace_ditto_14B",
+    }
+)
+
+_WAN_MULTITALK = frozenset(
+    {
+        "multitalk",
+        "vace_multitalk_14B",
+        "i2v_2_2_multitalk",
+        "infinitetalk",
+    }
+)
+
+_WAN_ARCHITECTURES = _WAN_I2V | _WAN_VACE | frozenset(
+    {
+        "t2v",
+        "t2v_1.3B",
+        "t2v_2_2",
+        "alpha",
+        "alpha2",
+        "alpha_lynx",
+        "lynx",
+        "lynx_lite",
+        "vista4d",
+        "bernini",
+        "bernini_1.3B",
+        "shotplan_t2v",
+        "shotplan_t2v_2_2",
+        "ti2v_2_2",
+        "lucy_edit",
+        "kiwi_edit",
+        "phantom_1.3B",
+        "phantom_14B",
+        "recam_1.3B",
+        "standin",
+        "mocha",
+    }
+)
+
+
+def _wan_injected_image_prompt_types(architecture: str) -> str | None:
+    """``image_prompt_types_allowed`` posé par ``wan_handler.query_model_def``.
+
+    ``None`` si l'architecture n'est pas celle de ce handler : la clé
+    manque alors vraiment, et ``update_default_settings`` lève KeyError
+    au lieu de sauter la tâche.
+    """
+    if architecture not in _WAN_ARCHITECTURES:
+        return None
+    if architecture in {"bernini", "bernini_1.3B"}:
+        return "T"
+    if architecture == "animate2":
+        return "TSVL"
+    if architecture in _WAN_VACE or architecture in {
+        "animate",
+        "t2v",
+        "t2v_2_2",
+        "shotplan_t2v",
+        "shotplan_t2v_2_2",
+        "lynx",
+    }:
+        return "TVL"
+    if architecture == "infinitetalk":
+        return "TSVL"
+    if architecture == "ti2v_2_2":
+        return "TSVL"
+    if architecture in {"lucy_edit", "kiwi_edit"}:
+        return "TVL"
+    if architecture in {"scail2_14B", "scail2_1.3B"}:
+        return "TSV"
+    if architecture == "fun_camera_1.3B":
+        return "TS"
+    if architecture == "uni3c":
+        return "S"
+    if architecture in _WAN_MULTITALK or architecture in {"fantasy", "steadydancer", "scail"}:
+        return "SVL"
+    if architecture in _WAN_I2V:
+        return "SEVL"
+    return ""
+
+
 _QUERY_INJECTED_IMAGE_MODES = frozenset(
     {
         "qwen_image_20B",
@@ -1946,10 +2089,116 @@ def _require_fix_settings_image_mode(
     )
 
 
+def _model_modes_abort_before_start_image(
+    model_modes: object,
+    model_mode: object,
+) -> bool:
+    """``image_mode not in image_modes`` lève TypeError avant l'image de départ.
+
+    La validation ne revient pas : le processus ne sort pas 0. Ce n'est pas
+    le saut silencieux d'une tâche sans MP4.
+    """
+    if model_mode is None or not isinstance(model_modes, dict):
+        return False
+    if "image_modes" not in model_modes:
+        return False
+    try:
+        0 in model_modes["image_modes"]
+    except TypeError:
+        return True
+    return False
+
+
+def _require_i2v_start_image(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    queue_model_mode: object,
+    queue_image_prompt_type: object,
+    model_type: str,
+    first_architecture: str | None,
+    first_where: str,
+    architecture_where: str,
+    prompt_types_explicit: bool,
+    black_frame_explicit: bool,
+) -> None:
+    """Refuse un I2V final dont la validation saute faute d'image de départ.
+
+    ``update_default_settings`` de ``models/wan/wan_handler.py`` pose
+    ``image_prompt_type`` à ``S`` quand l'architecture finale est I2V et
+    que ``image_prompt_types_allowed`` contient ``S``. La file de ce
+    pipeline n'envoie pas cette clé, ni d'image. ``validate_settings``
+    renvoie une erreur. ``process_tasks_cli`` compte la tâche sautée
+    (``completed == total - skipped``) et sort 0, sans MP4.
+    ``query_model_def`` du premier JSON injecte la chaîne si elle manque
+    (``SEVL`` pour ``fun_inp_1.3B`` et ``chrono_edit``). ``black_frame``
+    fabrique une image noire à la place : ``i2v`` et ``flf2v_720p`` ne
+    sont pas sautés. Un ``image_modes`` non itérable lève TypeError avant
+    ce contrôle.
+    """
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or architecture not in _WAN_I2V:
+        return
+    if prompt_types_explicit:
+        allowed: object = merged.get("image_prompt_types_allowed")
+        allowed_note = ""
+    else:
+        if first_architecture is None:
+            return
+        injected = _wan_injected_image_prompt_types(first_architecture)
+        if injected is None:
+            return
+        allowed = injected
+        allowed_note = (
+            f" La clé est absente du JSON. query_model_def({first_architecture!r}) "
+            f"l'injecte ({injected!r}) dans init_model_def, seulement pour le premier "
+            f"fichier ({first_where})."
+        )
+    if not isinstance(allowed, str) or "S" not in allowed:
+        return
+    if (
+        queue_image_prompt_type is not _QUEUE_MODEL_MODE_UNSET
+        and queue_image_prompt_type is not None
+    ):
+        prompt_type = queue_image_prompt_type
+    elif "image_prompt_type" in settings:
+        prompt_type = settings["image_prompt_type"]
+    else:
+        prompt_type = "S"
+    if not isinstance(prompt_type, str):
+        return
+    if "S" not in prompt_type:
+        return
+    if black_frame_explicit:
+        black_frame = bool(merged.get("black_frame"))
+    else:
+        black_frame = first_architecture in _WAN_BLACK_FRAME
+    if black_frame and "S" in allowed:
+        return
+    mode = _effective_model_mode(settings, queue_model_mode)
+    modes = merged.get("model_modes")
+    if _model_modes_abort_before_start_image(modes, mode):
+        return
+    shown = architecture_where or first_where or model_type
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. update_default_settings "
+        "(models/wan/wan_handler.py) pose image_prompt_type à S pour "
+        f"l'architecture finale {architecture}, parce que image_prompt_types_allowed "
+        f"({allowed!r}) contient S. La file n'envoie pas d'image de départ. "
+        "validate_settings renvoie une erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        "black_frame n'est pas vrai : aucune image noire ne remplace le fichier manquant."
+        f"{allowed_note} "
+        f"Architecture lue dans {shown}. "
+        f"Retirer {architecture}, écrire image_prompt_types_allowed sans S, "
+        "ou poser image_prompt_type sans S dans les réglages du JSON."
+    )
+
+
 def _require_video_model_definition(
     root: Path | None,
     model_type: str,
     queue_model_mode: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_image_prompt_type: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -1971,6 +2220,10 @@ def _require_video_model_definition(
     injecter ``model_modes.image_modes`` ``[2]``. Tant qu'aucun JSON
     n'écrit ``model_modes``, un ``chrono_edit`` final avec ``model_mode``
     2 voit cette liste, ``model_mode`` devient None et le JPEG sort.
+    Une architecture I2V finale dont ``image_prompt_types_allowed`` contient
+    ``S`` pose ``image_prompt_type`` à ``S``. Sans image de départ, la tâche
+    est sautée et le CLI sort 0. La chaîne vient du premier
+    ``query_model_def`` si aucun JSON ne l'écrit.
     """
     if root is None:
         return
@@ -1981,6 +2234,8 @@ def _require_video_model_definition(
     first_where = ""
     architecture_where = ""
     model_modes_where = ""
+    prompt_types_explicit = False
+    black_frame_explicit = False
     for _relative, logical, opened, note in _model_definition_entries(root, model_type):
         try:
             loaded = json.loads(opened.read_text(encoding="utf-8"))
@@ -2017,6 +2272,10 @@ def _require_video_model_definition(
             architecture_where = where
         if "model_modes" in model:
             model_modes_where = where
+        if "image_prompt_types_allowed" in model:
+            prompt_types_explicit = True
+        if "black_frame" in model:
+            black_frame_explicit = True
         merged.update(model)
     forced = (
         _HANDLER_FORCED_FLAGS.get(first_architecture, frozenset())
@@ -2057,6 +2316,18 @@ def _require_video_model_definition(
         first_where,
     )
     _require_fix_settings_image_mode(merged, architecture_where, model_type)
+    _require_i2v_start_image(
+        merged,
+        settings,
+        queue_model_mode,
+        queue_image_prompt_type,
+        model_type,
+        first_architecture,
+        first_where,
+        architecture_where,
+        prompt_types_explicit,
+        black_frame_explicit,
+    )
 
 
 def _wan_mp4_target(root: Path | None) -> str:
