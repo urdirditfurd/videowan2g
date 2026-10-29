@@ -1,0 +1,18 @@
+{
+  "name": "videowan2g",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node automation.js",
+    "self-test": "node automation.js --self-test"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "node-fetch": "^3.3.2",
+    "simple-git": "^4.0.2"
+  }
+}
