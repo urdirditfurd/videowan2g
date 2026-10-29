@@ -430,7 +430,11 @@ def require_ffmpeg(
     différent de 2 force ``image_mode`` à 1 et écrit un JPEG, même quand
     ``image_outputs`` est faux parce que ``query_model_def`` n'a pas été
     rappelé. ``model_mode`` vient des clés hors ``model`` (réglages du
-    JSON) puis de la file si elle l'envoie non nul. ``defaults`` peut valoir
+    JSON) puis de la file si elle l'envoie non nul. Ce 2 ne tient pas si
+    ``model_modes.image_modes`` ne contient pas 0 : ``validate_settings``
+    remet ``model_mode`` à None avant le handler, le JPEG est écrit, et
+    le CLI sort 0. Sans la clé ``image_modes``, la liste reste
+    ``[0, 1, 2]`` et la vidéo est écrite. ``defaults`` peut valoir
     ``/proc/self/cwd/<dossier>`` :
     ``glob`` suit le cwd du clone. Un lien ``plugins`` ou
     ``plugin_info.json`` vers ``/proc/self`` a le même effet.
@@ -1741,10 +1745,33 @@ def _effective_model_mode(settings: dict[str, object], queue_model_mode: object)
     return queue_model_mode
 
 
+def _chrono_model_mode_cleared(model_modes: object, model_mode: object) -> bool:
+    """``validate_settings`` remet ``model_mode`` à None avant le handler.
+
+    La liste de départ est ``[0, 1, 2]``. ``model_modes.image_modes``, si la
+    clé est présente, la remplace. La file de ce pipeline demande
+    ``image_mode`` 0. S'il n'est pas dans cette liste et que ``model_mode``
+    n'est pas déjà None, WanGP l'efface. ``chrono_edit`` fait alors
+    ``image_mode = 1`` : un JPEG, et ``process_tasks_cli`` sort 0.
+    Une clé absente laisse ``[0, 1, 2]``. Un ``image_modes`` qui n'est pas
+    un conteneur fait lever ``TypeError`` : le processus ne sort pas 0.
+    """
+    if model_mode is None or not isinstance(model_modes, dict):
+        return False
+    if "image_modes" not in model_modes:
+        return False
+    visibility = model_modes["image_modes"]
+    try:
+        return 0 not in visibility
+    except TypeError:
+        return False
+
+
 def _require_chrono_final_architecture(
     merged: dict[str, object],
     settings: dict[str, object],
     where: str,
+    model_modes_where: str,
     queue_model_mode: object,
     model_type: str,
 ) -> None:
@@ -1757,10 +1784,26 @@ def _require_chrono_final_architecture(
     ``image_mode = 0 if model_mode == 2 else 1`` et raccourcit
     ``video_length``. Le défaut ``model_mode`` est ``null``, donc un JPEG
     est écrit et ``process_tasks_cli`` sort avec le code 0.
+    Un ``model_mode`` 2 est annulé avant ce test si ``model_modes.image_modes``
+    ne contient pas 0 : le handler voit None et écrit quand même le JPEG.
     """
     if merged.get("architecture") != "chrono_edit":
         return
     mode = _effective_model_mode(settings, queue_model_mode)
+    if mode == 2 and _chrono_model_mode_cleared(merged.get("model_modes"), mode):
+        shown = model_modes_where or where
+        raise Wan2GPError(
+            "image_mode est forcé à 1. validate_settings annule model_mode avant "
+            "validate_generative_settings (models/wan/wan_handler.py). "
+            "model_modes.image_modes ne contient pas 0, et la file demande image_mode 0. "
+            f"model_mode={mode!r} devient None. Pour l'architecture finale chrono_edit, "
+            "None n'est pas 2 : image_mode devient 1, un JPEG est écrit et "
+            "process_tasks_cli quitte avec le code 0, sans MP4. "
+            "image_outputs peut rester faux. "
+            f"model_modes lu dans {shown}. "
+            f"Remettre 0 dans image_modes, ou retirer chrono_edit de la définition de {model_type}. "
+            "Sans la clé image_modes, la liste reste [0, 1, 2] et model_mode 2 écrit une vidéo."
+        )
     if mode == 2:
         return
     raise Wan2GPError(
@@ -1771,7 +1814,8 @@ def _require_chrono_final_architecture(
         "query_model_def n'est pas rappelé, donc image_outputs peut rester faux. "
         f"Architecture lue dans {where}. "
         f"Retirer chrono_edit de la définition de {model_type}. "
-        "model_mode 2 garde image_mode à 0 et écrit une vidéo."
+        "model_mode 2 garde image_mode à 0 et écrit une vidéo, "
+        "sauf si model_modes.image_modes ne contient pas 0."
     )
 
 
@@ -1789,9 +1833,11 @@ def _require_video_model_definition(
     ni ignorer le fichier du clone. Le premier JSON décide aussi de
     l'architecture passée à ``query_model_def``. Une architecture image,
     audio, mesh ou world pose le drapeau sans clé. Les fichiers suivants
-    ne le retirent que s'ils l'écrivent. L'architecture finale, elle,
+    ne le retirent que s'ils l'écrivent.     L'architecture finale, elle,
     alimente ``validate_generative_settings`` : ``chrono_edit`` force
-    quand même le JPEG si ``model_mode`` n'est pas 2.
+    quand même le JPEG si ``model_mode`` n'est pas 2. Un ``model_mode`` 2
+    est aussi annulé avant ce test quand ``model_modes.image_modes`` ne
+    contient pas 0 : le handler voit None et écrit le JPEG.
     """
     if root is None:
         return
@@ -1801,6 +1847,7 @@ def _require_video_model_definition(
     first_architecture: str | None = None
     first_where = ""
     architecture_where = ""
+    model_modes_where = ""
     for _relative, logical, opened, note in _model_definition_entries(root, model_type):
         try:
             loaded = json.loads(opened.read_text(encoding="utf-8"))
@@ -1835,6 +1882,8 @@ def _require_video_model_definition(
         settings.update({key: value for key, value in loaded.items() if key != "model"})
         if "architecture" in model:
             architecture_where = where
+        if "model_modes" in model:
+            model_modes_where = where
         merged.update(model)
     forced = (
         _HANDLER_FORCED_FLAGS.get(first_architecture, frozenset())
@@ -1868,6 +1917,7 @@ def _require_video_model_definition(
         merged,
         settings,
         architecture_where,
+        model_modes_where,
         queue_model_mode,
         model_type,
     )

@@ -7081,6 +7081,139 @@ class DryRunTest(unittest.TestCase):
                 queue_model_mode=2,
             )
 
+    def test_image_modes_without_zero_clears_model_mode_two(self) -> None:
+        """``model_mode`` 2 ne tient pas si ``image_modes`` cache le mode 0.
+
+        ``validate_settings`` remplace ``[0, 1, 2]`` par ``image_modes``.
+        La file demande ``image_mode`` 0. S'il n'est pas dans la liste,
+        ``model_mode`` 2 devient None avant ``validate_generative_settings``.
+        ``chrono_edit`` écrit alors un JPEG et le CLI sort 0. ``image_outputs``
+        peut rester faux. ``model_modes`` posé sur le premier JSON survit
+        au finetune qui ne réécrit pas la clé.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            finetunes = root / "finetunes"
+            defaults.mkdir(parents=True)
+            finetunes.mkdir()
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "model_modes": {
+                                "label": "Chrono Edit Process",
+                                "default": 2,
+                                "image_modes": [1, 2],
+                            },
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "chrono_edit", "image_outputs": False},
+                        "model_mode": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("validate_settings", message)
+            self.assertIn("image_modes", message)
+            self.assertIn("model_mode=2", message)
+            self.assertIn("None", message)
+            self.assertIn("JPEG", message)
+            self.assertIn("code 0", message)
+            self.assertIn("defaults/t2v_1.3B.json", message)
+            self.assertIn("chrono_edit", message)
+
+    def test_image_modes_including_zero_keeps_model_mode_two(self) -> None:
+        """``image_modes`` qui contient 0 laisse ``model_mode`` 2 écrire une vidéo."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "chrono_edit",
+                            "image_outputs": False,
+                            "model_modes": {"image_modes": [0]},
+                        },
+                        "model_mode": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_queue_model_mode_two_cleared_by_image_modes(self) -> None:
+        """La file envoie 2, mais ``image_modes`` vide l'annule avant le handler."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            finetunes = root / "finetunes"
+            finetunes.mkdir(parents=True)
+            (finetunes / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "chrono_edit",
+                            "image_outputs": False,
+                            "model_modes": {"image_modes": []},
+                        },
+                        "model_mode": 0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_model_mode=2,
+                )
+            message = str(caught.exception)
+            self.assertIn("image_modes", message)
+            self.assertIn("finetunes/t2v_1.3B.json", message)
+            self.assertIn("model_mode=2", message)
+
+    def test_non_iterable_image_modes_is_not_a_silent_jpeg(self) -> None:
+        """Un ``image_modes`` entier lève TypeError dans WanGP : pas un succès silencieux.
+
+        ``0 not in 5`` n'est pas le chemin qui écrit un JPEG et sort 0.
+        ``model_mode`` 2 reste donc accepté ici.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "t2v_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "chrono_edit",
+                            "image_outputs": False,
+                            "model_modes": {"image_modes": 5},
+                        },
+                        "model_mode": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
     def test_later_chrono_stops_before_the_gpu(self) -> None:
         """Le processus n'est pas lancé quand le finetune force le JPEG."""
         config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
