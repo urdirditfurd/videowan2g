@@ -74,7 +74,21 @@ est refusée même si ``sub_parallel_window_size`` vaut 0 et que le
 recouvrement parallèle tient dans la borne. La tâche est sautée et le
 CLI sort 0, sans MP4. Un ``color_correction`` faux ignore une force 2.
 Si le recouvrement 17 dépasse ``overlap_max`` 8, cette erreur-là sort
-avant.
+avant. Le même validateur contrôle ensuite
+``sliding_window_overlap_noise`` si ``vace_class`` est vrai, ou si
+``model_type`` contient ``sky_df`` ou ``diffusion_forcing``. Le défaut
+d'usine est 0 (minimum 0, maximum 150) : il passe.
+``query_model_def`` de Wan pose ``vace_class`` pour ``test_vace`` au
+premier JSON seulement. Un finetune VACE après ``t2v_1.3B`` ne
+l'injecte pas. Une valeur 151 est refusée même si la force de couleur
+vaut 0, ``sub_parallel_window_size`` vaut 0 et le recouvrement
+parallèle tient dans la borne. La tâche est sautée et le CLI sort 0,
+sans MP4. ``sky_df_1.3B`` rend le réglage visible sans ``vace_class``.
+``df_handler`` ne pose pas ``color_correction`` : une force 2 est
+ignorée et le bruit 151 est l'erreur. Sans ``vace_class`` et avec
+``model_type`` ``t2v_1.3B``, le bruit 151 est ignoré. Si
+``color_correction`` est vrai et que la force vaut 2, cette erreur-là
+sort avant.
 """
 
 from __future__ import annotations
@@ -392,6 +406,11 @@ def generate(request: GenerationRequest) -> GenerationResult:
         if "sliding_window_color_correction_strength" in payload
         else _QUEUE_MODEL_MODE_UNSET
     )
+    queue_overlap_noise = (
+        payload["sliding_window_overlap_noise"]
+        if "sliding_window_overlap_noise" in payload
+        else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -409,6 +428,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_sub_parallel_window_overlap=queue_sub_parallel_window_overlap,
         queue_sub_parallel_window_size=queue_sub_parallel_window_size,
         queue_color_correction_strength=queue_color_correction_strength,
+        queue_overlap_noise=queue_overlap_noise,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -495,6 +515,7 @@ def require_ffmpeg(
     queue_sub_parallel_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_overlap_noise: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -865,6 +886,7 @@ def require_ffmpeg(
         queue_sub_parallel_window_overlap,
         queue_sub_parallel_window_size,
         queue_color_correction_strength,
+        queue_overlap_noise,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -2803,6 +2825,7 @@ def _require_video_model_definition(
     queue_sub_parallel_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_overlap_noise: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -2858,6 +2881,13 @@ def _require_video_model_definition(
     Une valeur 2 ou 1.01 est refusée, la tâche est sautée et le CLI sort 0.
     ``query_model_def`` de Wan pose le drapeau à vrai. ``animate2`` le
     remet à faux dans ce même appel. Un JSON qui l'écrit à faux l'efface.
+    ``vace_class`` ou un ``model_type`` qui contient ``sky_df`` ou
+    ``diffusion_forcing`` rend ensuite visible
+    ``sliding_window_overlap_noise``. Le défaut d'usine est 0. Une
+    valeur 151 est refusée, la tâche est sautée et le CLI sort 0.
+    ``query_model_def`` pose ``vace_class`` pour ``test_vace`` au premier
+    JSON seulement. ``df_handler`` ne pose pas ``color_correction`` :
+    une force 2 y est ignorée et le bruit 151 est l'erreur.
     """
     if root is None:
         return
@@ -2879,6 +2909,7 @@ def _require_video_model_definition(
     sliding_defaults_explicit = False
     sub_parallel_explicit = False
     color_correction_explicit = False
+    vace_class_explicit = False
     first_model: dict[str, object] = {}
     for _relative, logical, opened, note in _model_definition_entries(root, model_type):
         try:
@@ -2939,6 +2970,8 @@ def _require_video_model_definition(
             sub_parallel_explicit = True
         if "color_correction" in model:
             color_correction_explicit = True
+        if "vace_class" in model:
+            vace_class_explicit = True
         merged.update(model)
     forced = (
         _HANDLER_FORCED_FLAGS.get(first_architecture, frozenset())
@@ -3080,6 +3113,16 @@ def _require_video_model_definition(
         architecture_where,
         color_correction_explicit,
         queue_color_correction_strength,
+    )
+    _require_overlap_noise(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_where,
+        architecture_where,
+        vace_class_explicit,
+        queue_overlap_noise,
     )
 
 
@@ -3926,6 +3969,180 @@ def _require_color_correction(
         f"Architecture finale {architecture}, lue dans {shown}. "
         "Poser sliding_window_color_correction_strength entre 0 et 1, ou écrire "
         "color_correction à faux."
+    )
+
+
+_FACTORY_OVERLAP_NOISE = 0
+_OVERLAP_NOISE_MIN = 0
+_OVERLAP_NOISE_MAX = 150
+_OVERLAP_NOISE_LABEL = "Noise to be added to overlapped frames to reduce blur effect"
+
+
+def _vace_class_enabled(
+    merged: dict[str, object],
+    vace_class_explicit: bool,
+    first_architecture: str | None,
+) -> bool:
+    """``vace_class`` vu par ``extra_settings`` après ``init_model_def``.
+
+    ``query_model_def`` de Wan pose le drapeau pour ``test_vace``
+    (``vace_14B``, ``vace_1.3B`` et la famille). Un JSON qui écrit la clé
+    remplace l'injection. Un finetune qui change l'architecture ne
+    rappelle pas ``query_model_def``.
+    """
+    if vace_class_explicit:
+        return bool(merged.get("vace_class"))
+    return first_architecture in _WAN_VACE
+
+
+def _overlap_noise_visible(
+    merged: dict[str, object],
+    vace_class_explicit: bool,
+    first_architecture: str | None,
+    model_type: str,
+) -> bool:
+    """Visibilité de ``sliding_window_overlap_noise``.
+
+    Le drapeau ``vace_class`` suffit. Sinon, ``validate_inputs`` lit
+    ``model_type`` dans les réglages de la file (pas le champ
+    ``architecture`` du JSON) et le rend visible s'il contient
+    ``sky_df`` ou ``diffusion_forcing``.
+    """
+    if _vace_class_enabled(merged, vace_class_explicit, first_architecture):
+        return True
+    lowered = model_type.lower()
+    return "sky_df" in lowered or "diffusion_forcing" in lowered
+
+
+def _extra_integer(value: object) -> tuple[str | None, int | None]:
+    """Entier accepté par ``validate_setting_value``.
+
+    Le premier élément est ``a integer`` ou ``an integer`` quand le type
+    est refusé, sinon None. Le second est l'entier retenu. ``int`` tronque
+    un flottant : 150.5 devient 150 et reste dans la borne. Une chaîne
+    n'est un entier que si ``float`` tombe juste (``151.0``). Un booléen
+    n'est pas un entier. Vide et None ne sont pas une erreur.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, str) and len(value.strip()) == 0:
+        return None, None
+    if isinstance(value, bool):
+        return "a integer", None
+    if isinstance(value, int):
+        return None, value
+    if isinstance(value, float):
+        return None, int(value)
+    if isinstance(value, str):
+        try:
+            return None, int(value)
+        except ValueError:
+            try:
+                parsed = float(value.strip())
+            except ValueError:
+                return "an integer", None
+            if not parsed.is_integer():
+                return "an integer", None
+            return None, int(parsed)
+    try:
+        return None, int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "an integer", None
+
+
+def _require_overlap_noise(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_where: str,
+    architecture_where: str,
+    vace_class_explicit: bool,
+    queue_overlap_noise: object,
+) -> None:
+    """Refuse un bruit de recouvrement hors de 0 et 150.
+
+    ``extra_settings.validate_inputs`` contrôle
+    ``sliding_window_overlap_noise`` après
+    ``sliding_window_color_correction_strength``, dès que ``vace_class``
+    est vrai ou que ``model_type`` contient ``sky_df`` ou
+    ``diffusion_forcing``. ``models/_settings.json`` vaut 0 : ce bruit
+    passe. Une valeur 151 est refusée même si la force de couleur vaut
+    0, ``sub_parallel_window_size`` vaut 0 et le recouvrement parallèle
+    tient dans la borne. ``validate_settings`` saute la tâche.
+    ``process_tasks_cli`` sort 0, sans MP4. Si ``color_correction`` est
+    vrai et que la force vaut 2, cette erreur-là sort avant.
+    """
+    if not _overlap_noise_visible(merged, vace_class_explicit, first_architecture, model_type):
+        return
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    if queue_overlap_noise is not _QUEUE_MODEL_MODE_UNSET and queue_overlap_noise is not None:
+        raw_noise: object = queue_overlap_noise
+        noise_note = "La file envoie sliding_window_overlap_noise."
+    elif "sliding_window_overlap_noise" in settings:
+        raw_noise = settings["sliding_window_overlap_noise"]
+        noise_note = "Le JSON de réglages envoie sliding_window_overlap_noise."
+    else:
+        raw_noise = _FACTORY_OVERLAP_NOISE
+        noise_note = (
+            "update_default_settings ne remplace pas sliding_window_overlap_noise. "
+            f"models/_settings.json le laisse à {raw_noise}."
+        )
+    shown = architecture_where or first_where or model_type
+    if _vace_class_enabled(merged, vace_class_explicit, first_architecture):
+        if vace_class_explicit:
+            flag_note = "Le JSON écrit vace_class."
+        else:
+            flag_note = (
+                f"query_model_def({first_architecture!r}) pose vace_class à vrai "
+                f"({first_where}). init_model_def n'est appelé que pour ce premier fichier. "
+                "Un JSON suivant qui change l'architecture ne retire pas le drapeau."
+            )
+    else:
+        flag_note = (
+            f"model_type {model_type!r} contient sky_df ou diffusion_forcing. "
+            "Le réglage est visible sans vace_class. L'architecture du JSON ne compte pas."
+        )
+    kind, noise = _extra_integer(raw_noise)
+    if kind is not None:
+        raise Wan2GPError(
+            "La tâche est sautée avant toute vidéo. sliding_window_overlap_noise "
+            f"vaut {raw_noise!r}, qui n'est pas un entier. "
+            "extra_settings.validate_inputs (shared/extra_settings.py) renvoie une erreur "
+            f"({_OVERLAP_NOISE_LABEL} must be {kind}) après "
+            "sliding_window_color_correction_strength. "
+            "validate_settings la propage. process_tasks_cli compte la tâche comme sautée "
+            "et quitte avec le code 0, sans MP4. "
+            f"{noise_note} {flag_note} "
+            f"Architecture finale {architecture}, lue dans {shown}."
+        )
+    if noise is None:
+        return
+    if _OVERLAP_NOISE_MIN <= noise <= _OVERLAP_NOISE_MAX:
+        return
+    if noise > _OVERLAP_NOISE_MAX:
+        limit = f"au-dessus de {_OVERLAP_NOISE_MAX}"
+        wan_message = f"must be at most {_OVERLAP_NOISE_MAX}"
+    else:
+        limit = f"en dessous de {_OVERLAP_NOISE_MIN}"
+        wan_message = f"must be at least {_OVERLAP_NOISE_MIN}"
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. sliding_window_overlap_noise "
+        f"vaut {noise}, {limit}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py) refuse la valeur "
+        f"({_OVERLAP_NOISE_LABEL} {wan_message}) après "
+        "sliding_window_color_correction_strength. "
+        "Le défaut d'usine 0 passe. La force de couleur 0, sub_parallel_window_size 0 "
+        "et un recouvrement parallèle dans la borne ne voient pas ce saut. "
+        "Si color_correction est vrai et que la force vaut 2, cette erreur-là sort avant. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        f"{noise_note} {flag_note} "
+        f"Architecture finale {architecture}, lue dans {shown}. "
+        "Poser sliding_window_overlap_noise entre 0 et 150, ou retirer vace_class "
+        "et un model_type sky_df ou diffusion_forcing."
     )
 
 

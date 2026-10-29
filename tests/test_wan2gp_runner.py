@@ -10551,6 +10551,430 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("at most 1", message)
             self.assertIn("code 0", message)
 
+    def test_overlap_noise_151_is_skipped(self) -> None:
+        """Le bruit 151 dépasse 150. La force 0 et le recouvrement 8 tiennent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "vace_class": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 0,
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn(
+                "Noise to be added to overlapped frames to reduce blur effect must be at most 150",
+                message,
+            )
+            self.assertIn("code 0", message)
+            self.assertNotIn("Color Correction Strength", message)
+            self.assertNotIn("Sub Parallel Window", message)
+
+    def test_overlap_noise_bounds_keep_a_video(self) -> None:
+        """0 et 150 sont dans la borne. Le défaut d'usine 0 aussi."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": 150},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": 0},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(root, {"architecture": "vace_1.3B"})
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_overlap_noise_float_is_truncated(self) -> None:
+        """int tronque : 150.5 passe, 151.9 devient 151."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": 150.5},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": 151.9},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertNotIn("must be an integer", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": -0.1},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_string_overlap_noise_151_is_skipped(self) -> None:
+        """« 151 » et « 151.0 » sont l'entier 151. « 151.9 » ne l'est pas."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": "151"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 150", str(caught.exception))
+            self.assertNotIn("must be an integer", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": "151.0"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 150", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": "151.9"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("must be an integer", str(caught.exception))
+
+    def test_negative_overlap_noise_is_skipped(self) -> None:
+        """Un bruit négatif est sous le minimum 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": -1},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at least 0", str(caught.exception))
+
+    def test_bool_overlap_noise_is_skipped(self) -> None:
+        """True n'est pas un entier pour extra_settings."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": True},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("must be a integer", str(caught.exception))
+
+    def test_empty_overlap_noise_keeps_a_video(self) -> None:
+        """Une chaîne vide n'est pas une erreur pour validate_setting_value."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_non_integer_overlap_noise_is_skipped(self) -> None:
+        """Un bruit illisible saute avant toute vidéo."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": "large"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("must be an integer", message)
+            self.assertIn("code 0", message)
+
+    def test_injected_vace_rejects_noise_151(self) -> None:
+        """query_model_def de VACE pose vace_class. La clé peut manquer."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "vace_1.3B"},
+                {"sliding_window_overlap_noise": 151},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertIn("query_model_def", message)
+            self.assertIn("vace_1.3B", message)
+            self.assertIn("code 0", message)
+
+    def test_vace_finetune_after_t2v_does_not_inject(self) -> None:
+        """Un finetune VACE ne rappelle pas query_model_def."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                finetune={
+                    "model": {"architecture": "vace_1.3B"},
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_later_false_clears_vace_class(self) -> None:
+        """Un JSON suivant qui écrit vace_class à faux l'efface."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "vace_1.3B", "vace_class": True},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B", "vace_class": False},
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_t2v_without_vace_ignores_noise_151(self) -> None:
+        """Sans vace_class, model_type t2v_1.3B ignore le bruit 151."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                {"sliding_window_overlap_noise": 151},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_architecture_sky_df_is_not_the_model_type(self) -> None:
+        """L'architecture du JSON ne rend pas le bruit visible."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "sky_df_1.3B"},
+                {"sliding_window_overlap_noise": 151},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_sky_df_model_type_rejects_noise_151(self) -> None:
+        """sky_df_1.3B rend le bruit visible. df_handler ignore une force 2."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "sky_df_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "sky_df_1.3B"},
+                        "sliding_window_color_correction_strength": 2,
+                        "sliding_window_overlap_noise": 151,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "sky_df_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertIn("sky_df_1.3B", message)
+            self.assertNotIn("Color Correction Strength", message)
+            self.assertIn("code 0", message)
+
+    def test_diffusion_forcing_model_type_rejects_noise_151(self) -> None:
+        """Le sous-chaîne diffusion_forcing suffit, même sans vace_class."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "clip_diffusion_forcing.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "t2v_1.3B", "color_correction": False},
+                        "sliding_window_overlap_noise": 151,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "clip_diffusion_forcing")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertIn("diffusion_forcing", message)
+
+    def test_color_strength_is_reported_before_noise(self) -> None:
+        """La force 2 sort avant le bruit 151."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "color_correction": True,
+                    "vace_class": True,
+                },
+                {
+                    "sliding_window_color_correction_strength": 2,
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Color Correction Strength", message)
+            self.assertNotIn("overlap_noise", message)
+            self.assertNotIn("blur effect", message)
+
+    def test_color_false_lets_noise_through(self) -> None:
+        """Un drapeau de couleur faux laisse passer la force 2. Le bruit 151 saute."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "color_correction": False,
+                    "vace_class": True,
+                },
+                {
+                    "sliding_window_color_correction_strength": 2,
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertNotIn("Color Correction Strength", message)
+
+    def test_parallel_overlap_is_reported_before_noise(self) -> None:
+        """Le recouvrement 17 dépasse overlap_max 8 avant le bruit 151."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "vace_class": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 17,
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Sub Parallel Window Overlap", message)
+            self.assertNotIn("blur effect", message)
+
+    def test_queue_overlap_noise_151_is_skipped(self) -> None:
+        """La file à 151 remplace le bruit d'usine 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(root, {"architecture": "vace_1.3B"})
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_overlap_noise=151,
+                )
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertIn("file", message.lower())
+
+    def test_queue_overlap_noise_overrides_a_bad_json(self) -> None:
+        """La file à 0 remplace un JSON à 151."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "vace_class": True},
+                {"sliding_window_overlap_noise": 151},
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_overlap_noise=0,
+            )
+
+    def test_overlap_noise_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand le bruit sort de la borne."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "name": "T2V",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "vace_class": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 0,
+                    "sliding_window_overlap_noise": 151,
+                },
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("151", message)
+            self.assertIn("at most 150", message)
+            self.assertIn("code 0", message)
+
 
 def _write_model(
     root: Path,
