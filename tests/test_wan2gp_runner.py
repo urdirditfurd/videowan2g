@@ -10206,6 +10206,374 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("at most 257", message)
             self.assertIn("code 0", message)
 
+    def test_color_strength_2_is_skipped(self) -> None:
+        """La force 2 dépasse 1. La taille 0 et le recouvrement 8 tiennent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Color Correction Strength must be at most 1", message)
+            self.assertIn("code 0", message)
+            self.assertNotIn("Sub Parallel Window", message)
+
+    def test_color_strength_1_01_is_skipped(self) -> None:
+        """1.01 est un nombre au-dessus de 1, pas une erreur de type."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": 1.01},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("1.01", message)
+            self.assertIn("at most 1", message)
+            self.assertNotIn("must be a number", message)
+
+    def test_color_strength_bounds_keep_a_video(self) -> None:
+        """0 et 1 sont dans la borne. Le défaut d'usine 0 aussi."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 1,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": 0},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(root, {"architecture": "t2v_1.3B"})
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_color_correction_false_ignores_strength_2(self) -> None:
+        """Un drapeau faux laisse passer une force 2."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": False},
+                {"sliding_window_color_correction_strength": 2},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_injected_color_correction_rejects_strength_2(self) -> None:
+        """query_model_def de Wan pose le drapeau. La clé peut manquer."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                {"sliding_window_color_correction_strength": 2},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 1", message)
+            self.assertIn("query_model_def", message)
+            self.assertIn("code 0", message)
+
+    def test_animate2_clears_injected_color_correction(self) -> None:
+        """animate2 remet le drapeau à faux dans le même query_model_def."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "animate2"},
+                {
+                    "image_prompt_type": "",
+                    "video_prompt_type": "",
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_later_animate2_keeps_injected_color_correction(self) -> None:
+        """Un finetune animate2 ne rappelle pas query_model_def."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                finetune={
+                    "model": {"architecture": "animate2"},
+                    "image_prompt_type": "",
+                    "video_prompt_type": "",
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("Color Correction Strength must be at most 1", str(caught.exception))
+
+    def test_later_false_clears_color_correction(self) -> None:
+        """Un JSON suivant qui écrit le drapeau à faux l'efface."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B", "color_correction": False},
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_parallel_overlap_is_reported_before_color(self) -> None:
+        """Le recouvrement 17 dépasse overlap_max 8 avant la force 2."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 17,
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Sub Parallel Window Overlap", message)
+            self.assertNotIn("Color Correction Strength", message)
+
+    def test_non_wan_without_flag_ignores_strength_2(self) -> None:
+        """ovi n'injecte pas color_correction. La force 2 est ignorée."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "ovi"},
+                {
+                    "sliding_window_overlap": 1,
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_explicit_color_correction_on_non_wan_is_skipped(self) -> None:
+        """La clé écrite à vrai suffit, même hors du handler Wan."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "ovi", "color_correction": True},
+                {
+                    "sliding_window_overlap": 1,
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 1", str(caught.exception))
+
+    def test_bool_color_strength_is_skipped(self) -> None:
+        """True n'est pas un nombre pour extra_settings."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": True},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("must be a number", str(caught.exception))
+
+    def test_empty_color_strength_keeps_a_video(self) -> None:
+        """Une chaîne vide n'est pas une erreur pour validate_setting_value."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_non_number_color_strength_is_skipped(self) -> None:
+        """Une force illisible saute avant toute vidéo."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": "large"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("must be a number", message)
+            self.assertIn("code 0", message)
+
+    def test_string_color_strength_2_is_skipped(self) -> None:
+        """« 2 » est le nombre 2, au-dessus de 1."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": "2"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 1", message)
+            self.assertNotIn("must be a number", message)
+
+    def test_negative_color_strength_is_skipped(self) -> None:
+        """Une force négative est sous le minimum 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": -0.01},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at least 0", str(caught.exception))
+
+    def test_queue_color_strength_2_is_skipped(self) -> None:
+        """La file à 2 remplace la force d'usine 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(root, {"architecture": "t2v_1.3B"})
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_color_correction_strength=2,
+                )
+            message = str(caught.exception)
+            self.assertIn("at most 1", message)
+            self.assertIn("file", message.lower())
+
+    def test_queue_color_strength_overrides_a_bad_json(self) -> None:
+        """La file à 0 remplace un JSON à 2."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "color_correction": True},
+                {"sliding_window_color_correction_strength": 2},
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_color_correction_strength=0,
+            )
+
+    def test_color_strength_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand la force sort de la borne."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "name": "T2V",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 2,
+                },
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("2", message)
+            self.assertIn("at most 1", message)
+            self.assertIn("code 0", message)
+
+
+def _write_model(
+    root: Path,
+    model: dict[str, object],
+    settings: dict[str, object] | None = None,
+    finetune: dict[str, object] | None = None,
+) -> None:
+    """Écrit ``defaults/t2v_1.3B.json`` et, au besoin, le finetune du même nom."""
+    defaults = root / "defaults"
+    defaults.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {"model": model}
+    if settings:
+        payload.update(settings)
+    (defaults / "t2v_1.3B.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    finetunes = root / "finetunes"
+    if finetune is None:
+        if finetunes.exists():
+            for path in finetunes.glob("*.json"):
+                path.unlink()
+        return
+    finetunes.mkdir(exist_ok=True)
+    (finetunes / "t2v_1.3B.json").write_text(json.dumps(finetune) + "\n", encoding="utf-8")
+
 
 def _saved_env(*keys: str) -> dict[str, str | None]:
     return {key: os.environ.get(key) for key in keys}

@@ -65,7 +65,16 @@ La tâche est sautée et le CLI sort 0, sans MP4.
 ``overlap_max`` de 8 laisse passer le recouvrement 5, puis refuse 17.
 ``query_model_def`` de ``scail2`` pose le drapeau sans resserrer
 ``window_max`` (257) ni ``overlap_max`` (97) : la taille 0 et le
-recouvrement 17 passent.
+recouvrement 17 passent. Le même validateur contrôle ensuite
+``sliding_window_color_correction_strength`` si ``color_correction``
+est vrai. Le défaut d'usine est 0 (minimum 0, maximum 1) : il passe.
+``query_model_def`` de Wan pose ce drapeau à vrai pour le premier JSON.
+``animate2`` le remet à faux dans le même appel. Une valeur 2 ou 1.01
+est refusée même si ``sub_parallel_window_size`` vaut 0 et que le
+recouvrement parallèle tient dans la borne. La tâche est sautée et le
+CLI sort 0, sans MP4. Un ``color_correction`` faux ignore une force 2.
+Si le recouvrement 17 dépasse ``overlap_max`` 8, cette erreur-là sort
+avant.
 """
 
 from __future__ import annotations
@@ -378,6 +387,11 @@ def generate(request: GenerationRequest) -> GenerationResult:
         if "sub_parallel_window_size" in payload
         else _QUEUE_MODEL_MODE_UNSET
     )
+    queue_color_correction_strength = (
+        payload["sliding_window_color_correction_strength"]
+        if "sliding_window_color_correction_strength" in payload
+        else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -394,6 +408,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_sliding_window_size=queue_sliding_window_size,
         queue_sub_parallel_window_overlap=queue_sub_parallel_window_overlap,
         queue_sub_parallel_window_size=queue_sub_parallel_window_size,
+        queue_color_correction_strength=queue_color_correction_strength,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -479,6 +494,7 @@ def require_ffmpeg(
     queue_sliding_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -848,6 +864,7 @@ def require_ffmpeg(
         queue_sliding_window_size,
         queue_sub_parallel_window_overlap,
         queue_sub_parallel_window_size,
+        queue_color_correction_strength,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -2785,6 +2802,7 @@ def _require_video_model_definition(
     queue_sliding_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_overlap: object = _QUEUE_MODEL_MODE_UNSET,
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -2835,6 +2853,11 @@ def _require_video_model_definition(
     Un ``overlap_max`` de 8 laisse le recouvrement 5 et refuse 17.
     ``scail2`` injecte le drapeau sans changer ces plafonds (257 et 97) :
     la taille 0 et le recouvrement 17 restent acceptés.
+    ``color_correction`` rend ensuite visible
+    ``sliding_window_color_correction_strength``. Le défaut d'usine est 0.
+    Une valeur 2 ou 1.01 est refusée, la tâche est sautée et le CLI sort 0.
+    ``query_model_def`` de Wan pose le drapeau à vrai. ``animate2`` le
+    remet à faux dans ce même appel. Un JSON qui l'écrit à faux l'efface.
     """
     if root is None:
         return
@@ -2855,6 +2878,7 @@ def _require_video_model_definition(
     sliding_window_explicit = False
     sliding_defaults_explicit = False
     sub_parallel_explicit = False
+    color_correction_explicit = False
     first_model: dict[str, object] = {}
     for _relative, logical, opened, note in _model_definition_entries(root, model_type):
         try:
@@ -2913,6 +2937,8 @@ def _require_video_model_definition(
             sliding_defaults_explicit = True
         if "sub_parallel_windows" in model:
             sub_parallel_explicit = True
+        if "color_correction" in model:
+            color_correction_explicit = True
         merged.update(model)
     forced = (
         _HANDLER_FORCED_FLAGS.get(first_architecture, frozenset())
@@ -3044,6 +3070,16 @@ def _require_video_model_definition(
         sub_parallel_explicit,
         sliding_defaults_explicit,
         queue_sub_parallel_window_overlap,
+    )
+    _require_color_correction(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_where,
+        architecture_where,
+        color_correction_explicit,
+        queue_color_correction_strength,
     )
 
 
@@ -3735,6 +3771,161 @@ def _require_sub_parallel_overlap(
         f"Architecture finale {architecture}, lue dans {shown}. "
         "Poser sub_parallel_window_overlap dans la borne, écrire sub_parallel_windows "
         "à faux, ou relever overlap_max."
+    )
+
+
+_FACTORY_COLOR_STRENGTH = 0
+_COLOR_STRENGTH_MIN = 0.0
+_COLOR_STRENGTH_MAX = 1.0
+
+
+def _color_correction_enabled(
+    merged: dict[str, object],
+    color_correction_explicit: bool,
+    first_architecture: str | None,
+) -> bool:
+    """``color_correction`` vu par ``extra_settings`` après ``init_model_def``.
+
+    ``query_model_def`` de Wan pose le drapeau à vrai pour toute
+    architecture de ce handler. ``animate2`` le remet à faux dans le
+    même appel. Un JSON qui écrit la clé remplace l'injection. Un
+    finetune qui change l'architecture ne rappelle pas ``query_model_def``.
+    """
+    if color_correction_explicit:
+        return bool(merged.get("color_correction"))
+    if first_architecture == "animate2":
+        return False
+    return first_architecture in _WAN_ARCHITECTURES
+
+
+def _color_strength_number(value: object) -> float | None:
+    """Nombre accepté par ``validate_setting_value`` pour un type ``number``.
+
+    ``None`` si la valeur est vide (pas d'erreur) ou si ce n'est pas un
+    nombre. Le booléen est distingué : ``True`` n'est pas un nombre pour
+    WanGP, même s'il est une sous-classe de ``int``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and len(value.strip()) == 0:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _color_strength_rejected(value: object) -> bool:
+    """``True`` quand ``validate_setting_value`` refuse le type."""
+    if value is None:
+        return False
+    if isinstance(value, str) and len(value.strip()) == 0:
+        return False
+    return _color_strength_number(value) is None
+
+
+def _format_color_strength(value: float) -> str:
+    """Même rendu que ``_format_number`` de ``extra_settings``."""
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
+def _require_color_correction(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_where: str,
+    architecture_where: str,
+    color_correction_explicit: bool,
+    queue_color_correction_strength: object,
+) -> None:
+    """Refuse une force de correction couleur hors de 0 et 1.
+
+    ``extra_settings.validate_inputs`` contrôle
+    ``sliding_window_color_correction_strength`` après
+    ``sub_parallel_window_overlap``, dès que ``color_correction`` est
+    vrai. ``models/_settings.json`` vaut 0 : cette force passe. Une
+    valeur 2 ou 1.01 est refusée même si ``sub_parallel_window_size``
+    vaut 0 et que le recouvrement parallèle tient dans la borne.
+    ``validate_settings`` saute la tâche. ``process_tasks_cli`` sort 0,
+    sans MP4. Un drapeau faux ignore une force 2. Si le recouvrement
+    parallèle 17 dépasse ``overlap_max`` 8, cette erreur-là sort avant.
+    """
+    if not _color_correction_enabled(merged, color_correction_explicit, first_architecture):
+        return
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    if (
+        queue_color_correction_strength is not _QUEUE_MODEL_MODE_UNSET
+        and queue_color_correction_strength is not None
+    ):
+        raw_strength: object = queue_color_correction_strength
+        strength_note = "La file envoie sliding_window_color_correction_strength."
+    elif "sliding_window_color_correction_strength" in settings:
+        raw_strength = settings["sliding_window_color_correction_strength"]
+        strength_note = "Le JSON de réglages envoie sliding_window_color_correction_strength."
+    else:
+        raw_strength = _FACTORY_COLOR_STRENGTH
+        strength_note = (
+            "update_default_settings ne sort pas sliding_window_color_correction_strength "
+            f"de la borne. models/_settings.json le laisse à {raw_strength}. "
+            "test_oneframe_overlap le réécrit à 0."
+        )
+    shown = architecture_where or first_where or model_type
+    if color_correction_explicit:
+        flag_note = "Le JSON écrit color_correction."
+    else:
+        flag_note = (
+            f"query_model_def({first_architecture!r}) pose color_correction à vrai "
+            f"({first_where}). animate2 le remet à faux dans ce même appel, pas dans "
+            "un JSON suivant. init_model_def n'est appelé que pour ce premier fichier."
+        )
+    if _color_strength_rejected(raw_strength):
+        raise Wan2GPError(
+            "La tâche est sautée avant toute vidéo. color_correction est vrai et "
+            f"sliding_window_color_correction_strength vaut {raw_strength!r}, qui n'est pas un nombre. "
+            "extra_settings.validate_inputs (shared/extra_settings.py) renvoie une erreur "
+            "(Color Correction Strength must be a number) après sub_parallel_window_overlap. "
+            "validate_settings la propage. process_tasks_cli compte la tâche comme sautée "
+            "et quitte avec le code 0, sans MP4. "
+            f"{strength_note} {flag_note} "
+            f"Architecture finale {architecture}, lue dans {shown}."
+        )
+    strength = _color_strength_number(raw_strength)
+    if strength is None:
+        return
+    if not (strength < _COLOR_STRENGTH_MIN or strength > _COLOR_STRENGTH_MAX):
+        return
+    shown_strength = _format_color_strength(strength)
+    if strength > _COLOR_STRENGTH_MAX:
+        limit = f"au-dessus de {_format_color_strength(_COLOR_STRENGTH_MAX)}"
+        wan_message = f"must be at most {_format_color_strength(_COLOR_STRENGTH_MAX)}"
+    else:
+        limit = f"en dessous de {_format_color_strength(_COLOR_STRENGTH_MIN)}"
+        wan_message = f"must be at least {_format_color_strength(_COLOR_STRENGTH_MIN)}"
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. color_correction est vrai et "
+        f"sliding_window_color_correction_strength vaut {shown_strength}, {limit}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py) refuse la valeur "
+        f"(Color Correction Strength {wan_message}) après sub_parallel_window_overlap. "
+        "Le défaut d'usine 0 passe. sub_parallel_window_size 0 et un recouvrement "
+        "parallèle dans la borne ne voient pas ce saut. Si ce recouvrement vaut 17 "
+        "avec overlap_max 8, cette erreur-là sort avant. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        f"{strength_note} {flag_note} "
+        f"Architecture finale {architecture}, lue dans {shown}. "
+        "Poser sliding_window_color_correction_strength entre 0 et 1, ou écrire "
+        "color_correction à faux."
     )
 
 
