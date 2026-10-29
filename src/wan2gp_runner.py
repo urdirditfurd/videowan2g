@@ -88,7 +88,22 @@ sans MP4. ``sky_df_1.3B`` rend le réglage visible sans ``vace_class``.
 ignorée et le bruit 151 est l'erreur. Sans ``vace_class`` et avec
 ``model_type`` ``t2v_1.3B``, le bruit 151 est ignoré. Si
 ``color_correction`` est vrai et que la force vaut 2, cette erreur-là
-sort avant.
+sort avant. Le même validateur contrôle ensuite
+``sliding_window_discard_last_frames`` si ``sliding_window`` est vrai
+et que ``model_type`` ne contient ni ``sky_df`` ni
+``diffusion_forcing``. Le défaut d'usine est 0 (minimum 0, maximum 20) :
+il passe. ``query_model_def`` de ``t2v_1.3B`` pose ``sliding_window``
+à faux. Il faut l'écrire à vrai, ou un premier JSON qui l'injecte
+(``t2v``, la famille I2V, VACE, ``fantasy``, ``lynx``, ``animate``,
+Wan 5B, ``multitalk``, ``infinitetalk``). Une valeur 21 est refusée
+même si le bruit vaut 0, la force de couleur vaut 0 et le recouvrement
+parallèle tient dans la borne. La tâche est sautée et le CLI sort 0,
+sans MP4. ``multitalk`` pose la valeur à 4, dans la borne. ``sky_df``
+ou ``diffusion_forcing`` cache ce contrôle. Si le bruit 151 est visible,
+cette erreur-là sort avant. ``large`` et ``21.5`` en chaîne lèvent
+``ValueError`` dans le ``int()`` du frame scheduler, avant
+``extra_settings``, quand ``image_mode`` est 0 et ``sliding_window``
+est vrai : le processus ne sort pas 0.
 """
 
 from __future__ import annotations
@@ -411,6 +426,11 @@ def generate(request: GenerationRequest) -> GenerationResult:
         if "sliding_window_overlap_noise" in payload
         else _QUEUE_MODEL_MODE_UNSET
     )
+    queue_discard_last_frames = (
+        payload["sliding_window_discard_last_frames"]
+        if "sliding_window_discard_last_frames" in payload
+        else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -429,6 +449,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_sub_parallel_window_size=queue_sub_parallel_window_size,
         queue_color_correction_strength=queue_color_correction_strength,
         queue_overlap_noise=queue_overlap_noise,
+        queue_discard_last_frames=queue_discard_last_frames,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -516,6 +537,7 @@ def require_ffmpeg(
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
     queue_overlap_noise: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_discard_last_frames: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -887,6 +909,7 @@ def require_ffmpeg(
         queue_sub_parallel_window_size,
         queue_color_correction_strength,
         queue_overlap_noise,
+        queue_discard_last_frames,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -2826,6 +2849,7 @@ def _require_video_model_definition(
     queue_sub_parallel_window_size: object = _QUEUE_MODEL_MODE_UNSET,
     queue_color_correction_strength: object = _QUEUE_MODEL_MODE_UNSET,
     queue_overlap_noise: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_discard_last_frames: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -2888,6 +2912,14 @@ def _require_video_model_definition(
     ``query_model_def`` pose ``vace_class`` pour ``test_vace`` au premier
     JSON seulement. ``df_handler`` ne pose pas ``color_correction`` :
     une force 2 y est ignorée et le bruit 151 est l'erreur.
+    ``sliding_window`` vrai, sans ``sky_df`` ni ``diffusion_forcing`` dans
+    ``model_type``, rend ensuite visible ``sliding_window_discard_last_frames``.
+    Le défaut d'usine est 0. Une valeur 21 est refusée, la tâche est sautée
+    et le CLI sort 0. ``query_model_def`` de ``t2v_1.3B`` pose
+    ``sliding_window`` à faux. ``multitalk`` pose la valeur à 4, dans la borne.
+    Une chaîne que le ``int()`` du frame scheduler refuse (``large``,
+    ``21.5``) lève ``ValueError`` avant ``extra_settings`` : le processus
+    ne sort pas 0.
     """
     if root is None:
         return
@@ -3123,6 +3155,16 @@ def _require_video_model_definition(
         architecture_where,
         vace_class_explicit,
         queue_overlap_noise,
+    )
+    _require_discard_last_frames(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_where,
+        architecture_where,
+        sliding_window_explicit,
+        queue_discard_last_frames,
     )
 
 
@@ -4143,6 +4185,166 @@ def _require_overlap_noise(
         f"Architecture finale {architecture}, lue dans {shown}. "
         "Poser sliding_window_overlap_noise entre 0 et 150, ou retirer vace_class "
         "et un model_type sky_df ou diffusion_forcing."
+    )
+
+
+_FACTORY_DISCARD_LAST = 0
+_MULTITALK_DISCARD_LAST = 4
+_DISCARD_LAST_MIN = 0
+_DISCARD_LAST_MAX = 20
+_DISCARD_LAST_LABEL = "Discard Last Frames of a Window"
+
+
+def _discard_last_frames_visible(
+    merged: dict[str, object],
+    sliding_window_explicit: bool,
+    first_architecture: str | None,
+    model_type: str,
+) -> bool:
+    """Visibilité de ``sliding_window_discard_last_frames``.
+
+    ``sliding_window`` doit être vrai. ``model_type`` (la file, pas le
+    champ ``architecture``) cache le réglage s'il contient ``sky_df`` ou
+    ``diffusion_forcing``. ``query_model_def`` de ``t2v_1.3B`` pose le
+    drapeau à faux : il faut l'écrire, ou un premier JSON qui l'injecte.
+    """
+    if not _sliding_size_enabled(merged, sliding_window_explicit, first_architecture):
+        return False
+    lowered = model_type.lower()
+    return "sky_df" not in lowered and "diffusion_forcing" not in lowered
+
+
+def _discard_scheduler_int_crashes(value: object) -> bool:
+    """``int(value or 0)`` du frame scheduler, avant ``extra_settings``.
+
+    ``validate_settings`` l'exécute quand ``image_mode`` est 0 et
+    ``sliding_window`` est vrai. ``large``, ``21.5`` et ``21.0`` lèvent
+    ``ValueError``. Le processus ne sort pas 0. ``extra_settings`` n'est
+    pas atteint.
+    """
+    try:
+        int(value or 0)
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
+def _factory_discard_last_frames(architecture: str) -> int:
+    """``sliding_window_discard_last_frames`` après ``update_default_settings``.
+
+    ``models/_settings.json`` part de 0. ``multitalk`` le pose à 4, dans
+    la borne. ``vace_14B`` et ``vace_multitalk_14B`` réécrivent 0.
+    """
+    if architecture == "multitalk":
+        return _MULTITALK_DISCARD_LAST
+    return _FACTORY_DISCARD_LAST
+
+
+def _require_discard_last_frames(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_where: str,
+    architecture_where: str,
+    sliding_window_explicit: bool,
+    queue_discard_last_frames: object,
+) -> None:
+    """Refuse un rejet de fenêtres hors de 0 et 20.
+
+    ``extra_settings.validate_inputs`` contrôle
+    ``sliding_window_discard_last_frames`` après
+    ``sliding_window_overlap_noise``, dès que ``sliding_window`` est vrai
+    et que ``model_type`` ne contient ni ``sky_df`` ni
+    ``diffusion_forcing``. ``models/_settings.json`` vaut 0 : ce rejet
+    passe. Une valeur 21 est refusée même si le bruit vaut 0, la force
+    de couleur vaut 0 et le recouvrement parallèle tient dans la borne.
+    ``validate_settings`` saute la tâche. ``process_tasks_cli`` sort 0,
+    sans MP4. Si le bruit 151 est visible, cette erreur-là sort avant.
+    Une chaîne que le ``int()`` du frame scheduler refuse n'est pas ce
+    saut : le processus ne sort pas 0.
+    """
+    if not _discard_last_frames_visible(
+        merged,
+        sliding_window_explicit,
+        first_architecture,
+        model_type,
+    ):
+        return
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    if (
+        queue_discard_last_frames is not _QUEUE_MODEL_MODE_UNSET
+        and queue_discard_last_frames is not None
+    ):
+        raw_discard: object = queue_discard_last_frames
+        discard_note = "La file envoie sliding_window_discard_last_frames."
+    elif "sliding_window_discard_last_frames" in settings:
+        raw_discard = settings["sliding_window_discard_last_frames"]
+        discard_note = "Le JSON de réglages envoie sliding_window_discard_last_frames."
+    else:
+        raw_discard = _factory_discard_last_frames(architecture)
+        if architecture == "multitalk":
+            discard_note = (
+                "update_default_settings de multitalk pose "
+                f"sliding_window_discard_last_frames à {raw_discard}. "
+                "Cette valeur est dans la borne."
+            )
+        else:
+            discard_note = (
+                "update_default_settings ne remplace pas "
+                "sliding_window_discard_last_frames. "
+                f"models/_settings.json le laisse à {raw_discard}."
+            )
+    shown = architecture_where or first_where or model_type
+    if sliding_window_explicit:
+        flag_note = "Le JSON écrit sliding_window."
+    else:
+        flag_note = (
+            f"query_model_def({first_architecture!r}) pose sliding_window à vrai "
+            f"({first_where}). init_model_def n'est appelé que pour ce premier fichier. "
+            "Un JSON suivant qui change l'architecture ne retire pas le drapeau. "
+            "query_model_def de t2v_1.3B le laisse faux."
+        )
+    if _discard_scheduler_int_crashes(raw_discard):
+        return
+    kind, discarded = _extra_integer(raw_discard)
+    if kind is not None:
+        raise Wan2GPError(
+            "La tâche est sautée avant toute vidéo. sliding_window est vrai et "
+            f"sliding_window_discard_last_frames vaut {raw_discard!r}, qui n'est pas un entier. "
+            "extra_settings.validate_inputs (shared/extra_settings.py) renvoie une erreur "
+            f"({_DISCARD_LAST_LABEL} must be {kind}) après sliding_window_overlap_noise. "
+            "validate_settings la propage. process_tasks_cli compte la tâche comme sautée "
+            "et quitte avec le code 0, sans MP4. "
+            f"{discard_note} {flag_note} "
+            f"Architecture finale {architecture}, lue dans {shown}."
+        )
+    if discarded is None:
+        return
+    if _DISCARD_LAST_MIN <= discarded <= _DISCARD_LAST_MAX:
+        return
+    if discarded > _DISCARD_LAST_MAX:
+        limit = f"au-dessus de {_DISCARD_LAST_MAX}"
+        wan_message = f"must be at most {_DISCARD_LAST_MAX}"
+    else:
+        limit = f"en dessous de {_DISCARD_LAST_MIN}"
+        wan_message = f"must be at least {_DISCARD_LAST_MIN}"
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. sliding_window est vrai et "
+        f"sliding_window_discard_last_frames vaut {discarded}, {limit}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py) refuse la valeur "
+        f"({_DISCARD_LAST_LABEL} {wan_message}) après sliding_window_overlap_noise. "
+        "Le défaut d'usine 0 passe. Le bruit 0, la force de couleur 0, "
+        "sub_parallel_window_size 0 et un recouvrement parallèle dans la borne "
+        "ne voient pas ce saut. Si le bruit 151 est visible, cette erreur-là sort avant. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        f"{discard_note} {flag_note} "
+        f"Architecture finale {architecture}, lue dans {shown}. "
+        "Poser sliding_window_discard_last_frames entre 0 et 20, ou écrire "
+        "sliding_window à faux. sky_df ou diffusion_forcing dans model_type cache le contrôle."
     )
 
 

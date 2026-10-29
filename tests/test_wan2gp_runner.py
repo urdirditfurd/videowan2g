@@ -10975,6 +10975,436 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("at most 150", message)
             self.assertIn("code 0", message)
 
+    def test_discard_last_frames_21_is_skipped(self) -> None:
+        """Le rejet 21 dépasse 20. Le bruit 0 et la force 0 tiennent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 0,
+                    "sliding_window_overlap_noise": 0,
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Discard Last Frames of a Window must be at most 20", message)
+            self.assertIn("code 0", message)
+            self.assertNotIn("blur effect", message)
+            self.assertNotIn("Color Correction Strength", message)
+            self.assertNotIn("Sub Parallel Window", message)
+
+    def test_discard_last_frames_bounds_keep_a_video(self) -> None:
+        """0 et 20 sont dans la borne. Le défaut d'usine 0 aussi."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": 20},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": 0},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(root, {"architecture": "t2v_1.3B", "sliding_window": True})
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_discard_last_frames_float_is_truncated(self) -> None:
+        """int tronque : 20.9 et -0.1 passent, 21.5 devient 21."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": 20.9},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": -0.1},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": 21.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 20", message)
+            self.assertNotIn("must be an integer", message)
+
+    def test_string_discard_21_is_skipped(self) -> None:
+        """« 21 » est l'entier 21. int() l'accepte, donc extra_settings refuse."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": "21"},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 20", str(caught.exception))
+            self.assertNotIn("must be an integer", str(caught.exception))
+
+    def test_discard_scheduler_string_is_not_a_silent_skip(self) -> None:
+        """« large », « 21.5 » et « 21.0 » lèvent ValueError avant extra_settings.
+
+        Le frame scheduler fait int() quand image_mode est 0 et
+        sliding_window est vrai. Le processus ne sort pas 0.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in ("large", "21.5", "21.0"):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "sliding_window": True},
+                    {"sliding_window_discard_last_frames": raw},
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_negative_discard_last_frames_is_skipped(self) -> None:
+        """Un rejet négatif est sous le minimum 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": -1},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at least 0", str(caught.exception))
+
+    def test_bool_discard_last_frames_is_skipped(self) -> None:
+        """True n'est pas un entier pour extra_settings. int(True) ne plante pas."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": True},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("must be a integer", str(caught.exception))
+
+    def test_empty_discard_last_frames_keeps_a_video(self) -> None:
+        """Une chaîne vide n'est pas une erreur pour validate_setting_value."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_sliding_window_off_ignores_discard_21(self) -> None:
+        """sliding_window faux retire le contrôle, y compris pour t2v_1.3B."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": False},
+                {"sliding_window_discard_last_frames": 21},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                {"sliding_window_discard_last_frames": 21},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_injected_sliding_window_rejects_discard_21(self) -> None:
+        """Le premier JSON qui injecte sliding_window refuse 21 sans la clé."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for architecture in ("t2v", "vace_1.3B", "ti2v_2_2"):
+                _write_model(
+                    root,
+                    {"architecture": architecture},
+                    {"sliding_window_discard_last_frames": 21},
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                message = str(caught.exception)
+                self.assertIn("at most 20", message)
+                self.assertIn("query_model_def", message)
+                self.assertIn(architecture, message)
+                self.assertIn("code 0", message)
+
+    def test_animate_injection_rejects_discard_21(self) -> None:
+        """animate injecte sliding_window. Les lettres d'usine sont vidées."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "animate"},
+                {
+                    "image_prompt_type": "",
+                    "video_prompt_type": "",
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 20", message)
+            self.assertIn("animate", message)
+
+    def test_finetune_keeps_injected_sliding_window(self) -> None:
+        """Un finetune t2v_1.3B ne retire pas le sliding_window injecté."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v"},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B"},
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 20", str(caught.exception))
+
+    def test_finetune_t2v_after_t2v_1_3b_does_not_inject(self) -> None:
+        """Un t2v seulement en finetune ne rappelle pas query_model_def."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                finetune={
+                    "model": {"architecture": "t2v"},
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_later_false_clears_sliding_window(self) -> None:
+        """Un JSON suivant qui écrit sliding_window à faux l'efface."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v", "sliding_window": True},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B", "sliding_window": False},
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_multitalk_factory_discard_keeps_a_video(self) -> None:
+        """multitalk pose 4, dans la borne. Les médias d'usine sont vidés."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "multitalk"},
+                {"image_prompt_type": "", "audio_prompt_type": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "multitalk"},
+                {
+                    "image_prompt_type": "",
+                    "audio_prompt_type": "",
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("at most 20", str(caught.exception))
+
+    def test_sky_df_hides_discard_21(self) -> None:
+        """sky_df dans model_type cache le rejet. La casse ne compte pas."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "SKY_DF_1.3B.json").write_text(
+                json.dumps(
+                    {
+                        "model": {"architecture": "t2v_1.3B", "sliding_window": True},
+                        "sliding_window_discard_last_frames": 21,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "SKY_DF_1.3B")
+
+    def test_diffusion_forcing_hides_discard_21(self) -> None:
+        """diffusion_forcing cache le rejet même si sliding_window est vrai."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            defaults = root / "defaults"
+            defaults.mkdir(parents=True)
+            (defaults / "clip_diffusion_forcing.json").write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "architecture": "t2v_1.3B",
+                            "sliding_window": True,
+                            "color_correction": False,
+                        },
+                        "sliding_window_discard_last_frames": 21,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            wan2gp_runner._require_video_model_definition(root, "clip_diffusion_forcing")
+
+    def test_noise_151_is_reported_before_discard(self) -> None:
+        """Le bruit 151 sort avant le rejet 21."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "vace_class": True,
+                    "color_correction": True,
+                },
+                {
+                    "sliding_window_color_correction_strength": 0,
+                    "sliding_window_overlap_noise": 151,
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("at most 150", message)
+            self.assertNotIn("Discard Last Frames", message)
+
+    def test_color_strength_is_reported_before_discard(self) -> None:
+        """La force 2 sort avant le rejet 21."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "color_correction": True,
+                },
+                {
+                    "sliding_window_color_correction_strength": 2,
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Color Correction Strength", message)
+            self.assertNotIn("Discard Last Frames", message)
+
+    def test_queue_discard_21_is_skipped(self) -> None:
+        """La file à 21 remplace le rejet d'usine 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(root, {"architecture": "t2v", "sliding_window": True})
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_discard_last_frames=21,
+                )
+            message = str(caught.exception)
+            self.assertIn("at most 20", message)
+            self.assertIn("file", message.lower())
+
+    def test_queue_discard_overrides_a_bad_json(self) -> None:
+        """La file à 0 remplace un JSON à 21."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True},
+                {"sliding_window_discard_last_frames": 21},
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_discard_last_frames=0,
+            )
+
+    def test_discard_last_frames_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand le rejet sort de la borne."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "name": "T2V",
+                    "sliding_window": True,
+                    "sub_parallel_windows": True,
+                    "color_correction": True,
+                    "sliding_window_defaults": {"overlap_max": 8},
+                },
+                {
+                    "sub_parallel_window_size": 0,
+                    "sub_parallel_window_overlap": 8,
+                    "sliding_window_color_correction_strength": 0,
+                    "sliding_window_overlap_noise": 0,
+                    "sliding_window_discard_last_frames": 21,
+                },
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("21", message)
+            self.assertIn("at most 20", message)
+            self.assertIn("code 0", message)
+
 
 def _write_model(
     root: Path,
