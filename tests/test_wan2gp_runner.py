@@ -12615,20 +12615,20 @@ class DryRunTest(unittest.TestCase):
                 self.assertNotIn("NAG Tau", message)
 
     def test_nag_scale_bounds_keep_a_video(self) -> None:
-        """1, 20 et l'usine 1 passent. NAG_alpha 3 n'est pas le saut de l'échelle."""
+        """1, 20 et l'usine 1 passent. NAG_alpha 2 reste dans la borne."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "wan"
             for raw in (1, 20, 1.0, "1", "20.0", "  20  "):
                 _write_model(
                     root,
                     {"architecture": "t2v_1.3B", "NAG": True},
-                    {"NAG_scale": raw, "NAG_tau": 5, "NAG_alpha": 3},
+                    {"NAG_scale": raw, "NAG_tau": 5, "NAG_alpha": 2},
                 )
                 wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
             _write_model(
                 root,
                 {"architecture": "t2v_1.3B", "NAG": True},
-                {"NAG_tau": 3.5, "NAG_alpha": 3},
+                {"NAG_tau": 3.5, "NAG_alpha": 2},
             )
             wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
 
@@ -12995,7 +12995,7 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("code 0", message)
 
     def test_nag_tau_above_5_is_skipped(self) -> None:
-        """5.01 dépasse 5. Une échelle dans la borne ne masque pas ce saut."""
+        """5.01 dépasse 5. NAG_alpha 3 est hors borne, mais l'erreur de tau sort avant."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "wan"
             for raw in (5.01, "5.01", "5.010", 6):
@@ -13017,20 +13017,20 @@ class DryRunTest(unittest.TestCase):
                 self.assertNotIn("NAG Alpha", message)
 
     def test_nag_tau_bounds_keep_a_video(self) -> None:
-        """1, 5 et l'usine 3.5 passent. NAG_alpha 3 n'est pas ce saut."""
+        """1, 5 et l'usine 3.5 passent. NAG_alpha 2 reste dans la borne."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "wan"
             for raw in (1, 5, 3.5, "5.0", "  5  ", "3.5"):
                 _write_model(
                     root,
                     {"architecture": "t2v_1.3B", "NAG": True},
-                    {"NAG_tau": raw, "NAG_alpha": 3, "NAG_scale": 20},
+                    {"NAG_tau": raw, "NAG_alpha": 2, "NAG_scale": 20},
                 )
                 wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
             _write_model(
                 root,
                 {"architecture": "t2v_1.3B", "NAG": True},
-                {"NAG_alpha": 3},
+                {"NAG_alpha": 2},
             )
             wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
 
@@ -13424,6 +13424,476 @@ class DryRunTest(unittest.TestCase):
                     )
             message = str(caught.exception)
             self.assertIn("NAG Tau must be at most 5", message)
+            self.assertIn("code 0", message)
+
+    def test_nag_alpha_above_2_is_skipped(self) -> None:
+        """2.01 dépasse 2. Un tau dans la borne ne masque pas ce saut."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in (2.01, "2.01", "2.010", 3):
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "NAG": True,
+                        "sliding_window": False,
+                    },
+                    {"NAG_alpha": raw, "NAG_scale": 1, "NAG_tau": 5},
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                message = str(caught.exception)
+                self.assertIn("NAG Alpha must be at most 2", message)
+                self.assertIn("code 0", message)
+                self.assertNotIn("NAG Scale", message)
+                self.assertNotIn("NAG Tau", message)
+                self.assertNotIn("Pace", message)
+
+    def test_nag_alpha_bounds_keep_a_video(self) -> None:
+        """0, 2 et l'usine 0.5 passent. pace 9 n'est pas ce saut."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in (0, 2, 0.5, "2.0", "  2  ", "0.5", -0.0):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "NAG": True},
+                    {"NAG_alpha": raw, "NAG_tau": 5, "NAG_scale": 20, "pace": 9},
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"pace": 9},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "NAG": True,
+                    "custom_settings": [{"id": "pace"}],
+                },
+                {
+                    "NAG_alpha": 2,
+                    "NAG_scale": 1,
+                    "NAG_tau": 3.5,
+                    "custom_settings": {"pace": 9, "exaggeration": 3},
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_nag_alpha_below_zero(self) -> None:
+        """-0.01 est sous 0. Une chaîne vide n'est pas une erreur."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in (-0.01, "-0.01"):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "NAG": True},
+                    {"NAG_alpha": raw, "NAG_scale": 1, "NAG_tau": 3.5},
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                self.assertIn("NAG Alpha must be at least 0", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"NAG_alpha": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"NAG_alpha": "  "},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_nag_alpha_type_errors(self) -> None:
+        """True et « large » donnent « must be a number », pas une borne."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in (True, "large"):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "NAG": True},
+                    {"NAG_alpha": raw, "NAG_scale": 1, "NAG_tau": 3.5},
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                message = str(caught.exception)
+                self.assertIn("NAG Alpha must be a number", message)
+                self.assertIn("code 0", message)
+                self.assertNotIn("at most 2", message)
+
+    def test_nag_off_ignores_alpha(self) -> None:
+        """Sans NAG, 2.01 est ignoré. t2v_1.3B, bernini et animate2 n'injectent pas."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for model in (
+                {"architecture": "t2v_1.3B"},
+                {"architecture": "t2v_1.3B", "NAG": False},
+                {"architecture": "t2v_1.3B", "NAG": 0},
+                {"architecture": "alpha_lynx"},
+            ):
+                _write_model(root, model, {"NAG_alpha": 2.01, "image_refs": ["ref.png"]})
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "bernini"},
+                {"NAG_alpha": 2.01, "video_prompt_type": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "bernini_1.3B"},
+                {"NAG_alpha": 2.01, "video_prompt_type": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "animate2"},
+                {
+                    "NAG_alpha": 2.01,
+                    "image_prompt_type": "",
+                    "video_prompt_type": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_truthy_nag_rejects_alpha(self) -> None:
+        """1 et la chaîne false sont vrais pour bool(), comme WanGP."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for flag in (1, "false"):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "NAG": flag},
+                    {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                self.assertIn("NAG Alpha must be at most 2", str(caught.exception))
+
+    def test_injected_architectures_reject_nag_alpha(self) -> None:
+        """t2v, vace, i2v, alpha, lynx et vista4d injectent NAG au premier JSON."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            cases = (
+                ({"architecture": "t2v"}, {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5}),
+                ({"architecture": "vace_1.3B"}, {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5}),
+                ({"architecture": "i2v"}, {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5}),
+                ({"architecture": "alpha"}, {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5}),
+                (
+                    {"architecture": "lynx"},
+                    {
+                        "NAG_alpha": 2.01,
+                        "NAG_scale": 1,
+                        "NAG_tau": 3.5,
+                        "image_refs": ["ref.png"],
+                    },
+                ),
+                ({"architecture": "vista4d"}, {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5}),
+            )
+            for model, settings in cases:
+                _write_model(root, model, settings)
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                message = str(caught.exception)
+                self.assertIn("NAG Alpha must be at most 2", message, model["architecture"])
+                self.assertIn(str(model["architecture"]), message)
+
+    def test_finetune_keeps_injected_nag_for_alpha(self) -> None:
+        """Un finetune t2v_1.3B ne retire pas le NAG injecté par t2v."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v"},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B"},
+                    "NAG_alpha": 2.01,
+                    "NAG_scale": 1,
+                    "NAG_tau": 3.5,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("NAG Alpha must be at most 2", str(caught.exception))
+
+    def test_finetune_t2v_after_t2v_1_3b_does_not_inject_nag_for_alpha(self) -> None:
+        """Un t2v seulement en finetune ne rappelle pas query_model_def."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                finetune={
+                    "model": {"architecture": "t2v"},
+                    "NAG_alpha": 2.01,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_later_false_clears_nag_for_alpha(self) -> None:
+        """Un JSON suivant qui écrit NAG à faux retire l'injection."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v"},
+                finetune={
+                    "model": {"architecture": "t2v_1.3B", "NAG": False},
+                    "NAG_alpha": 2.01,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_explicit_false_on_injector_clears_nag_for_alpha(self) -> None:
+        """Le premier JSON qui écrit NAG à faux écrase la formule."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v", "NAG": False},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_custom_nag_alpha_bounds(self) -> None:
+        """Un objet model.NAG_alpha change le maximum, le minimum et le libellé."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"max": 3}},
+                {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"max": 1}},
+                {"NAG_alpha": 2, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("NAG Alpha must be at most 1", message)
+            self.assertNotIn("at most 2", message)
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "NAG": True,
+                    "NAG_alpha": {"label": "Custom Alpha (boost)"},
+                },
+                {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Custom Alpha must be at most 2", message)
+            self.assertNotIn("NAG Alpha", message)
+            self.assertNotIn("boost", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"max": "nope"}},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"max": True}},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"min": 1}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("NAG Alpha must be at least 1", str(caught.exception))
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "NAG": True,
+                    "NAG_alpha": {"min": 3, "max": 1},
+                },
+                {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("NAG Alpha must be at least 3", message)
+            self.assertNotIn("at most 1", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"label": "("}},
+                {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("NAG_alpha must be at most 2", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": {"label": None}},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_alpha": 1},
+                {"NAG_alpha": 2.01, "NAG_tau": 5.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_tau": 4},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "NAG_scale": 5},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+
+    def test_queue_nag_alpha_overrides_the_factory(self) -> None:
+        """La file à 2.01 remplace l'usine 0.5. La file à 0.5 répare un JSON à 2.01."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(root, {"architecture": "t2v_1.3B", "NAG": True})
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_nag_alpha=2.01,
+                )
+            message = str(caught.exception)
+            self.assertIn("NAG Alpha must be at most 2", message)
+            self.assertIn("file", message.lower())
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_nag_alpha=0.5,
+            )
+
+    def test_earlier_extra_settings_win_over_nag_alpha(self) -> None:
+        """NAG_tau, NAG_scale, top_k et le trim sortent avant NAG_alpha."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"NAG_tau": 5.01, "NAG_alpha": 2.01, "NAG_scale": 1},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("NAG Tau must be at most 5", message)
+            self.assertNotIn("NAG Alpha", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True},
+                {"NAG_scale": 21, "NAG_alpha": 2.01, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("NAG Scale must be at most 20", message)
+            self.assertNotIn("NAG Alpha", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "top_k_slider": True},
+                {"top_k": 101, "NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Top-k must be at most 100", message)
+            self.assertNotIn("NAG Alpha", message)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "NAG": True, "sliding_window": True},
+                {"sliding_window_trim_first_frames": 11, "NAG_alpha": 2.01},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Trim First Frames", message)
+            self.assertNotIn("NAG Alpha", message)
+
+    def test_scheduler_crash_blocks_nag_alpha(self) -> None:
+        """Un rejet « large » ou un discard_step 0 lève avant extra_settings."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": True, "NAG": True},
+                {"sliding_window_discard_last_frames": "large", "NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "NAG": True,
+                    "sliding_window_defaults": {"discard_step": 0},
+                },
+                {"NAG_alpha": 2.01},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "sliding_window": False, "NAG": True},
+                {"sliding_window_discard_last_frames": "large", "NAG_alpha": 2.01},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("NAG Alpha must be at most 2", str(caught.exception))
+
+    def test_nag_alpha_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand NAG_alpha sort de la borne."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "name": "T2V", "NAG": True},
+                {"NAG_alpha": 2.01, "NAG_scale": 1, "NAG_tau": 3.5},
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("NAG Alpha must be at most 2", message)
             self.assertIn("code 0", message)
 
 

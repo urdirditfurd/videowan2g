@@ -139,8 +139,13 @@ sautée et le CLI sort 0, sans MP4. Le validateur contrôle ensuite
 Le défaut d'usine est 3,5 : il passe. Un JSON qui écrit ``NAG`` rend
 5,01 refusé. Un objet ``model.NAG_tau`` peut changer le libellé et les
 bornes. La tâche est sautée et le CLI sort 0, sans MP4. Si
-``NAG_scale`` 21 est visible, cette erreur-là sort avant. ``NAG_alpha``
-vient ensuite.
+``NAG_scale`` 21 est visible, cette erreur-là sort avant. Le validateur
+contrôle ensuite ``NAG_alpha`` (nombre, minimum 0, maximum 2), dans le
+même conteneur. Le défaut d'usine est 0,5 : il passe. Un JSON qui écrit
+``NAG`` rend 2,01 refusé. Un objet ``model.NAG_alpha`` peut changer le
+libellé et les bornes. La tâche est sautée et le CLI sort 0, sans MP4.
+Si ``NAG_tau`` 5,01 est visible, cette erreur-là sort avant. ``pace``
+vient ensuite, seulement si ``custom_settings`` contient l'id ``pace``.
 """
 
 from __future__ import annotations
@@ -477,6 +482,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
     queue_top_k = payload["top_k"] if "top_k" in payload else _QUEUE_MODEL_MODE_UNSET
     queue_nag_scale = payload["NAG_scale"] if "NAG_scale" in payload else _QUEUE_MODEL_MODE_UNSET
     queue_nag_tau = payload["NAG_tau"] if "NAG_tau" in payload else _QUEUE_MODEL_MODE_UNSET
+    queue_nag_alpha = payload["NAG_alpha"] if "NAG_alpha" in payload else _QUEUE_MODEL_MODE_UNSET
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -501,6 +507,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_top_k=queue_top_k,
         queue_nag_scale=queue_nag_scale,
         queue_nag_tau=queue_nag_tau,
+        queue_nag_alpha=queue_nag_alpha,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -594,6 +601,7 @@ def require_ffmpeg(
     queue_top_k: object = _QUEUE_MODEL_MODE_UNSET,
     queue_nag_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_nag_tau: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_nag_alpha: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -971,6 +979,7 @@ def require_ffmpeg(
         queue_top_k,
         queue_nag_scale,
         queue_nag_tau,
+        queue_nag_alpha,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -2935,6 +2944,7 @@ def _require_video_model_definition(
     queue_top_k: object = _QUEUE_MODEL_MODE_UNSET,
     queue_nag_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_nag_tau: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_nag_alpha: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -3038,9 +3048,15 @@ def _require_video_model_definition(
     ``model.NAG_tau``). Le défaut d'usine est 3,5. Une valeur 5,01 est
     refusée, la tâche est sautée et le CLI sort 0. Si ``NAG_scale`` 21
     est visible, cette erreur-là sort avant. Un objet illisible sur
-    ``NAG_scale`` ou ``NAG_alpha`` lève ``AttributeError`` dans
-    ``get_def`` avant cette erreur : le processus ne sort pas 0.
-    ``NAG_alpha`` vient ensuite.
+    ``NAG_scale``, ``NAG_tau`` ou ``NAG_alpha`` lève ``AttributeError``
+    dans ``get_def`` avant cette erreur : le processus ne sort pas 0.
+    ``NAG`` rend ensuite visible ``NAG_alpha`` (nombre, minimum 0,
+    maximum 2, sauf objet ``model.NAG_alpha``). Le défaut d'usine est
+    0,5. Une valeur 2,01 est refusée, la tâche est sautée et le CLI
+    sort 0. Si ``NAG_tau`` 5,01 est visible, cette erreur-là sort avant.
+    ``pace`` vient ensuite : visible seulement si ``custom_settings``
+    contient l'id ``pace``, et la valeur est lue dans le dict
+    ``custom_settings`` des entrées, pas à la racine.
     """
     if root is None:
         return
@@ -3354,6 +3370,18 @@ def _require_video_model_definition(
         first_architecture,
         queue_discard_last_frames,
         queue_nag_tau,
+    )
+    _require_nag_alpha(
+        merged,
+        settings,
+        model_type,
+        first_where,
+        architecture_where,
+        nag_explicit,
+        sliding_window_explicit,
+        first_architecture,
+        queue_discard_last_frames,
+        queue_nag_alpha,
     )
 
 
@@ -4953,6 +4981,10 @@ _FACTORY_NAG_TAU = 3.5
 _NAG_TAU_MIN = 1.0
 _NAG_TAU_MAX = 5.0
 _NAG_TAU_LABEL = "NAG Tau"
+_FACTORY_NAG_ALPHA = 0.5
+_NAG_ALPHA_MIN = 0.0
+_NAG_ALPHA_MAX = 2.0
+_NAG_ALPHA_LABEL = "NAG Alpha"
 
 
 def _injected_nag(architecture: str | None) -> bool:
@@ -5224,9 +5256,9 @@ def _require_nag_tau(
     if _nag_scale_spec(merged) is None or _nag_number_spec(
         merged,
         "NAG_alpha",
-        "NAG Alpha",
-        0.0,
-        2.0,
+        _NAG_ALPHA_LABEL,
+        _NAG_ALPHA_MIN,
+        _NAG_ALPHA_MAX,
     ) is None:
         return
     spec = _nag_number_spec(
@@ -5317,6 +5349,144 @@ def _require_nag_tau(
         f"Architecture finale {architecture}, lue dans {shown}. "
         "Poser NAG_tau dans la borne, écrire NAG à faux, ou relever max dans "
         "l'objet model.NAG_tau."
+    )
+
+
+def _require_nag_alpha(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_where: str,
+    architecture_where: str,
+    nag_explicit: bool,
+    sliding_window_explicit: bool,
+    first_architecture: str | None,
+    queue_discard_last_frames: object,
+    queue_nag_alpha: object,
+) -> None:
+    """Refuse un NAG alpha hors de 0 et 2.
+
+    ``extra_settings.validate_inputs`` contrôle ``NAG_alpha`` après
+    ``NAG_tau``, dès que le conteneur ``NAG_col`` est visible, donc dès
+    que ``NAG`` est vrai. Le type est un nombre. ``models/_settings.json``
+    vaut 0,5. 2,01 est refusé. 0 et 2 passent. ``-0,01`` est sous 0. Un
+    objet ``model.NAG_alpha`` peut relever le maximum (``{"max": 3}``
+    laisse passer 2,01) ou le baisser (``{"max": 1}`` refuse 2) et
+    remplacer le libellé. ``validate_settings`` saute la tâche.
+    ``process_tasks_cli`` sort 0, sans MP4. Si ``NAG_tau`` 5,01 est
+    visible, cette erreur-là sort avant. Si ``NAG_scale`` 21 est visible,
+    elle sort encore avant le tau. Un objet illisible sur ``NAG_scale``,
+    ``NAG_tau`` ou ``NAG_alpha`` lève ``AttributeError`` dans ``get_def``
+    avant toute erreur de borne. ``pace`` vient ensuite et n'est pas ce
+    saut. Le frame scheduler qui lève n'atteint pas ``extra_settings``.
+    """
+    if _frame_scheduler_skips_extra_settings(
+        merged,
+        settings,
+        sliding_window_explicit,
+        first_architecture,
+        queue_discard_last_frames,
+    ):
+        return
+    if not _nag_enabled(merged, nag_explicit, first_architecture):
+        return
+    if _nag_scale_spec(merged) is None or _nag_number_spec(
+        merged,
+        "NAG_tau",
+        _NAG_TAU_LABEL,
+        _NAG_TAU_MIN,
+        _NAG_TAU_MAX,
+    ) is None:
+        return
+    spec = _nag_number_spec(
+        merged,
+        "NAG_alpha",
+        _NAG_ALPHA_LABEL,
+        _NAG_ALPHA_MIN,
+        _NAG_ALPHA_MAX,
+    )
+    if spec is None:
+        return
+    label, minimum, maximum = spec
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    if queue_nag_alpha is not _QUEUE_MODEL_MODE_UNSET and queue_nag_alpha is not None:
+        raw_alpha: object = queue_nag_alpha
+        alpha_note = "La file envoie NAG_alpha."
+    elif "NAG_alpha" in settings:
+        raw_alpha = settings["NAG_alpha"]
+        alpha_note = "Le JSON de réglages envoie NAG_alpha."
+    else:
+        raw_alpha = _FACTORY_NAG_ALPHA
+        alpha_note = (
+            "update_default_settings de Wan ne remplace pas NAG_alpha. "
+            f"models/_settings.json le laisse à {_format_color_strength(_FACTORY_NAG_ALPHA)}."
+        )
+    shown = architecture_where or first_where or model_type
+    if nag_explicit:
+        flag_note = (
+            "Le JSON écrit NAG. bool de WanGP : 1 et la chaîne false sont vrais, "
+            "0 est faux."
+        )
+    else:
+        flag_note = (
+            f"query_model_def({first_architecture!r}) pose NAG à vrai "
+            f"({first_where}). La formule est (vace_class ou test_class_t2v ou "
+            "test_class_i2v) et pas (bernini ou animate2). t2v_1.3B n'est pas "
+            "dans test_class_t2v. init_model_def n'est appelé que pour ce premier "
+            "fichier. Un JSON suivant qui change l'architecture ne retire pas le drapeau."
+        )
+    if isinstance(merged.get("NAG_alpha"), dict):
+        flag_note += " Les bornes viennent de l'objet model.NAG_alpha."
+    else:
+        flag_note += " Les bornes d'usine sont 0 et 2."
+    if _color_strength_rejected(raw_alpha):
+        raise Wan2GPError(
+            "La tâche est sautée avant toute vidéo. NAG est vrai et "
+            f"NAG_alpha vaut {raw_alpha!r}, qui n'est pas un nombre. "
+            "extra_settings.validate_inputs (shared/extra_settings.py) renvoie une erreur "
+            f"({label} must be a number) après NAG_tau. "
+            "validate_settings la propage. process_tasks_cli compte la tâche comme sautée "
+            "et quitte avec le code 0, sans MP4. "
+            f"{alpha_note} {flag_note} "
+            f"Architecture finale {architecture}, lue dans {shown}."
+        )
+    alpha = _color_strength_number(raw_alpha)
+    if alpha is None:
+        return
+    too_low = minimum is not None and alpha < minimum
+    too_high = maximum is not None and alpha > maximum
+    if not too_low and not too_high:
+        return
+    shown_alpha = _format_color_strength(alpha)
+    if too_low and minimum is not None:
+        shown_limit = _format_color_strength(minimum)
+        limit = f"en dessous de {shown_limit}"
+        wan_message = f"must be at least {shown_limit}"
+    elif too_high and maximum is not None:
+        shown_limit = _format_color_strength(maximum)
+        limit = f"au-dessus de {shown_limit}"
+        wan_message = f"must be at most {shown_limit}"
+    else:
+        return
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. NAG est vrai et "
+        f"NAG_alpha vaut {shown_alpha}, {limit}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py) refuse la valeur "
+        f"({label} {wan_message}) après NAG_tau. "
+        "Le défaut d'usine 0.5 passe, ainsi que 0 et 2. 2.01 non. -0.01 est sous 0. "
+        "Un objet model.NAG_alpha peut changer le libellé et les bornes : "
+        "max 3 laisse passer 2.01, max 1 refuse 2. "
+        "Si NAG_tau 5.01 est visible, cette erreur-là sort avant. "
+        "Si NAG_scale 21 est visible, elle sort encore avant le tau. "
+        "pace vient après : une valeur 9 n'est pas ce saut. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte la tâche "
+        "comme sautée et quitte avec le code 0, sans MP4. "
+        f"{alpha_note} {flag_note} "
+        f"Architecture finale {architecture}, lue dans {shown}. "
+        "Poser NAG_alpha dans la borne, écrire NAG à faux, ou relever max dans "
+        "l'objet model.NAG_alpha."
     )
 
 
