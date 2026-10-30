@@ -17616,6 +17616,514 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("Guidance3 must be a number.", message)
             self.assertIn("code 0", message)
 
+    def test_num_inference_steps2_is_skipped(self) -> None:
+        """Des pas de phase 2 hors borne sautent avant le GPU."""
+        integer = "Phase 2 Steps must be an integer."
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in ("large", "false", "1.5", "100.010"):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "inference_steps2": True},
+                    {
+                        "num_inference_steps2": raw,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                        "switch_threshold": 0,
+                    },
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                text = str(caught.exception)
+                self.assertIn(integer, text)
+                self.assertIn("code 0", text)
+                self.assertIn(f"« {integer} »", text)
+            for raw in (0, 0.0, "0", -1):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "inference_steps2": "false"},
+                    {
+                        "num_inference_steps2": raw,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                    },
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                self.assertIn("Phase 2 Steps must be at least 1.", str(caught.exception))
+            for raw in (101, 101.5, "101", "101.0", "  101  "):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "inference_steps2": True},
+                    {
+                        "num_inference_steps2": raw,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                        "switch_threshold2": "large",
+                    },
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                text = str(caught.exception)
+                self.assertIn("« Phase 2 Steps must be at most 100. »", text)
+                self.assertNotIn("Guidance Switch Threshold", text)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": True,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("Phase 2 Steps must be a integer.", str(caught.exception))
+            for phases in (1, "1"):
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "inference_steps2": True,
+                        "lock_guidance_phases": "false",
+                    },
+                    {
+                        "num_inference_steps2": 0,
+                        "guidance_phases": phases,
+                        "custom_sigmas": "",
+                    },
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                self.assertIn("Phase 2 Steps must be at least 1.", str(caught.exception))
+            for visible in (0, 1, 2):
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "inference_steps2": True,
+                        "visible_phases": visible,
+                    },
+                    {
+                        "num_inference_steps2": 0,
+                        "guidance_phases": 2,
+                        "guidance_scale": 5,
+                        "guidance2_scale": 5,
+                        "guidance3_scale": 5,
+                        "custom_sigmas": "",
+                    },
+                )
+                with self.assertRaises(Wan2GPError) as caught:
+                    wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+                self.assertIn("Phase 2 Steps must be at least 1.", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "plain_arch", "inference_steps2": True, "guidance_max_phases": 3},
+                {
+                    "num_inference_steps2": 101,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("Phase 2 Steps must be at most 100.", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True, "custom_sigmas": 0},
+                {"num_inference_steps2": "large", "guidance_phases": None},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn(integer, str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True, "NAG": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "NAG_alpha": 2.01,
+                    "NAG_scale": 1,
+                    "NAG_tau": 3.5,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            text = str(caught.exception)
+            self.assertIn("Phase 2 Steps must be at least 1.", text)
+            self.assertNotIn("NAG Alpha", text)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "custom_sigmas": "0.9;0.2",
+                    "guidance_phases": 2,
+                    "num_inference_steps2": "large",
+                    "switch_threshold": 0,
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn(integer, str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 3,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_num_inference_steps2="large",
+                )
+            self.assertIn(integer, str(caught.exception))
+            self.assertIn("La file envoie num_inference_steps2.", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(
+                    root,
+                    "t2v_1.3B",
+                    queue_num_inference_steps2=None,
+                )
+            self.assertIn("Le JSON de réglages envoie num_inference_steps2.", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "guidance_scale": "large",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            text = str(caught.exception)
+            self.assertIn("Guidance must be a number.", text)
+            self.assertNotIn("Phase 2 Steps", text)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "switch_threshold": "large",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            text = str(caught.exception)
+            self.assertIn("Guidance Switch Threshold must be an integer.", text)
+            self.assertNotIn("Phase 2 Steps", text)
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+                finetune={"model": {"architecture": "still_wan"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn(integer, str(caught.exception))
+            self.assertIn("laisse cette valeur", str(caught.exception))
+
+    def test_num_inference_steps2_keeps_a_video(self) -> None:
+        """Des pas de phase 2 dans la borne, ou cachés, ne sautent pas."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            for raw in (3, 1, 100, 100.9, 1.5, "3", "100.0", "", "   ", None):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "inference_steps2": True},
+                    {
+                        "num_inference_steps2": raw,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                        "switch_threshold": 0,
+                        "guidance_scale": 5,
+                        "guidance2_scale": 5,
+                        "guidance3_scale": 5,
+                    },
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {"guidance_phases": 2, "custom_sigmas": ""},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            for flag in (0, False, "", None):
+                _write_model(
+                    root,
+                    {"architecture": "t2v_1.3B", "inference_steps2": flag},
+                    {
+                        "num_inference_steps2": 0,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                    },
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B"},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 1,
+                    "custom_sigmas": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "inference_steps2": True,
+                    "lock_guidance_phases": 0,
+                },
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 1,
+                    "custom_sigmas": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            for max_phases in (0, 1, False, True):
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "inference_steps2": True,
+                        "guidance_max_phases": max_phases,
+                    },
+                    {
+                        "num_inference_steps2": 0,
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                    },
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            for max_phases in ("3", "nope", None):
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "inference_steps2": True,
+                        "guidance_max_phases": max_phases,
+                    },
+                    {
+                        "num_inference_steps2": "large",
+                        "guidance_phases": 2,
+                        "custom_sigmas": "",
+                        "switch_threshold": 0,
+                    },
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "inference_steps2": True,
+                    "visible_phases": "nope",
+                },
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "switch_threshold": 0,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "plain_arch", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True, "switch_threshold": "nope"},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True, "custom_sigmas": 0},
+                {"num_inference_steps2": "large", "guidance_phases": "1.5"},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True, "sliding_window": True},
+                {
+                    "num_inference_steps2": 0,
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "sliding_window_discard_last_frames": "large",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "custom_sigmas": "0.9;",
+                    "guidance_phases": 2,
+                    "num_inference_steps2": "large",
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertNotIn("Phase 2 Steps", str(caught.exception))
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": 3,
+                    "guidance_phases": 3,
+                    "custom_sigmas": "",
+                    "switch_threshold": 100,
+                    "switch_threshold2": 200,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 1,
+                    "custom_sigmas": "",
+                    "switch_threshold2": "large",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                    "video_prompt_type": 12,
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+                finetune={"model": {"inference_steps2": False}},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+                finetune={"model": {"guidance_max_phases": 0}},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "inference_steps2": True},
+                {
+                    "num_inference_steps2": "large",
+                    "guidance_phases": 2,
+                    "custom_sigmas": "",
+                },
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_num_inference_steps2="",
+            )
+            wan2gp_runner._require_video_model_definition(
+                root,
+                "t2v_1.3B",
+                queue_num_inference_steps2=3,
+            )
+
+    def test_num_inference_steps2_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand les pas de phase 2 sont illisibles."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {"architecture": "t2v_1.3B", "name": "T2V", "inference_steps2": True},
+                {"custom_sigmas": "", "guidance_phases": 2},
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(
+                                config.wan,
+                                root=root,
+                                extra_settings={"num_inference_steps2": "large"},
+                            ),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("Phase 2 Steps must be an integer.", message)
+            self.assertIn("code 0", message)
+
     def test_guidance_switch_is_skipped(self) -> None:
         """Un seuil de guidance illisible saute avant le GPU."""
         integer = "Guidance Switch Threshold must be an integer."

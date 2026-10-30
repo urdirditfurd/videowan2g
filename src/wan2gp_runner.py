@@ -221,6 +221,16 @@ donne « Guidance Switch Threshold must be an integer. ». ``validate_inputs``
 ne met pas ``guidance_phases`` dans le contexte du libellé : trois phases
 gardent le même texte, pas « Phase 1-2 ». Un seuil réécrit par les sigmas
 continus n'est plus revu. Le CLI sort 0, sans MP4.
+``extra_settings`` contrôle ensuite ``num_inference_steps2`` (entier, 1 à
+100, libellé « Phase 2 Steps ») seulement si ``inference_steps2`` est vrai.
+Wan ne l'injecte pas : la chaîne ``false`` l'est, ``0`` ne l'est pas. La
+comparaison ``guidance_max_phases >= 2`` n'appelle pas ``int`` : une chaîne
+``3`` lève ``TypeError``. Le réglage est actif si ``guidance_phases`` vaut
+au moins 2, ou si ``lock_guidance_phases`` est vrai. L'usine 3 passe, ainsi
+qu'une chaîne vide. ``large`` donne « Phase 2 Steps must be an integer. ».
+0 est sous 1. 101 dépasse 100. ``True`` donne « must be a integer. ».
+``visible_phases`` 2 ne cache pas ce réglage quand le drapeau est vrai.
+Si le seuil est déjà l'erreur, elle sort avant. Le CLI sort 0, sans MP4.
 """
 
 from __future__ import annotations
@@ -586,6 +596,11 @@ def generate(request: GenerationRequest) -> GenerationResult:
     queue_guidance3_scale = (
         payload["guidance3_scale"] if "guidance3_scale" in payload else _QUEUE_MODEL_MODE_UNSET
     )
+    queue_num_inference_steps2 = (
+        payload["num_inference_steps2"]
+        if "num_inference_steps2" in payload
+        else _QUEUE_MODEL_MODE_UNSET
+    )
     binaries = require_ffmpeg(
         root,
         wan.python or sys.executable,
@@ -620,6 +635,7 @@ def generate(request: GenerationRequest) -> GenerationResult:
         queue_guidance_scale=queue_guidance_scale,
         queue_guidance2_scale=queue_guidance2_scale,
         queue_guidance3_scale=queue_guidance3_scale,
+        queue_num_inference_steps2=queue_num_inference_steps2,
     )
     before = _file_index(raw_dir)
     log_path = request.output_dir / "logs" / f"{stem}.log"
@@ -723,6 +739,7 @@ def require_ffmpeg(
     queue_guidance_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_guidance2_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_guidance3_scale: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_num_inference_steps2: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> FfmpegBinaries:
     """Vérifie le ffmpeg que Wan2GP va réellement lancer, avant le GPU.
 
@@ -1110,6 +1127,7 @@ def require_ffmpeg(
         queue_guidance_scale,
         queue_guidance2_scale,
         queue_guidance3_scale,
+        queue_num_inference_steps2,
     )
     _require_wan_binary_is_a_file(root)
     ffmpeg = _resolve_binary("ffmpeg", root)
@@ -3084,6 +3102,7 @@ def _require_video_model_definition(
     queue_guidance_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_guidance2_scale: object = _QUEUE_MODEL_MODE_UNSET,
     queue_guidance3_scale: object = _QUEUE_MODEL_MODE_UNSET,
+    queue_num_inference_steps2: object = _QUEUE_MODEL_MODE_UNSET,
 ) -> None:
     """Refuse une définition qui fait écrire autre chose qu'un MP4.
 
@@ -3250,6 +3269,12 @@ def _require_video_model_definition(
     phases. Un seuil réécrit par les sigmas continus n'est plus revu.
     ``guidance_scale`` hors borne sort avant ce seuil. La comparaison des
     deux seuils, ligne 1407, vient après et n'est pas ce saut.
+    ``extra_settings`` contrôle ensuite ``num_inference_steps2`` (entier,
+    1 à 100). Wan n'injecte pas ``inference_steps2``. La chaîne ``false``
+    est vraie, ``0`` est faux. ``guidance_max_phases >= 2`` n'appelle pas
+    ``int``. L'usine 3 passe. ``large`` est refusé. ``visible_phases`` 2
+    ne cache pas le réglage. Un seuil déjà hors borne sort avant.
+    ``switch_threshold2`` vient ensuite et n'est pas ce saut.
     """
     if root is None:
         return
@@ -3555,6 +3580,35 @@ def _require_video_model_definition(
         queue_guidance_scale,
         queue_guidance2_scale,
         queue_guidance3_scale,
+    )
+    _require_phase2_steps(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_model,
+        first_where,
+        architecture_where,
+        guidance_max_phases_explicit,
+        custom_sigmas_explicit,
+        custom_sigmas_schedulers_explicit,
+        custom_sigmas_continuous_explicit,
+        custom_sigmas_switch_scale_explicit,
+        image_ref_explicit,
+        guide_custom_explicit,
+        kiwi_ref_explicit,
+        sliding_window_explicit,
+        queue_model_mode,
+        queue_video_prompt_type,
+        queue_audio_prompt_type,
+        queue_discard_last_frames,
+        queue_custom_settings,
+        queue_custom_sigmas,
+        queue_guidance_phases,
+        queue_sample_solver,
+        queue_switch_threshold,
+        queue_switch_threshold2,
+        queue_num_inference_steps2,
     )
     _require_chrono_final_architecture(
         merged,
@@ -7021,6 +7075,9 @@ _FACTORY_GUIDANCE_SCALE = 5
 _GUIDANCE_SCALE_MIN = 1.0
 _GUIDANCE_SCALE_MAX = 20.0
 _FACTORY_SWITCH_THRESHOLD = 0
+_FACTORY_PHASE2_STEPS = 3
+_PHASE2_STEPS_MIN = 1.0
+_PHASE2_STEPS_MAX = 100.0
 _GUIDANCE_FIELDS = (
     ("guidance_scale", 1, "Guidance"),
     ("guidance2_scale", 2, "Guidance2"),
@@ -7979,7 +8036,7 @@ def _raise_guidance_switch(
         f"{raw!r} pour guidance_phases {phases!r}. "
         "extra_settings.validate_inputs (shared/extra_settings.py, ligne 535) "
         "refuse le seuil après les échelles de guidance et avant "
-        "switch_threshold2, dès que guidance_max_phases vaut au moins 2, "
+        "num_inference_steps2, dès que guidance_max_phases vaut au moins 2, "
         "que le conteneur guidance_phases_row est visible, et que "
         "guidance_phases vaut au moins 2 (ou que lock_guidance_phases "
         "est vrai). "
@@ -8167,6 +8224,228 @@ def _require_guidance_switch(
         message,
         value_note,
         phase_note,
+        max_note,
+        architecture,
+        shown,
+    )
+
+
+def _phase2_steps_visible(steps_flag: object, max_raw: object) -> bool | None:
+    """Visibilité de ``num_inference_steps2``, ou None si ``>=`` lève.
+
+    Le prédicat de WanGP n'appelle pas ``int``. ``false`` en chaîne est
+    vrai et ``0`` est faux : le ``and`` court-circuite avant la
+    comparaison. Une chaîne ``3`` pour ``guidance_max_phases`` lève
+    ``TypeError``. Le processus ne sort pas 0.
+    """
+    if not steps_flag:
+        return False
+    try:
+        return bool(max_raw >= 2)  # type: ignore[operator]
+    except TypeError:
+        return None
+
+
+def _raise_phase2_steps(
+    raw: object,
+    phases: object,
+    wan_message: str,
+    value_note: str,
+    phase_note: str,
+    flag_note: str,
+    max_note: str,
+    architecture: str,
+    shown: str,
+) -> None:
+    """``num_inference_steps2`` n'est pas un entier entre 1 et 100."""
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. num_inference_steps2 vaut "
+        f"{raw!r} pour guidance_phases {phases!r}. "
+        "extra_settings.validate_inputs (shared/extra_settings.py, ligne 536) "
+        "refuse Phase 2 Steps juste après switch_threshold et avant "
+        "switch_threshold2, dès que inference_steps2 est vrai, que "
+        "guidance_max_phases est comparable et vaut au moins 2 (sans int : "
+        "une chaîne 3 lève TypeError), que guidance_phases vaut au moins 2 "
+        "(ou que lock_guidance_phases est vrai), et que le conteneur "
+        "guidance_phases_row est ouvert. "
+        f"Le message est « {wan_message} ». "
+        "L'entier va de 1 à 100. L'usine 3 passe, ainsi qu'une chaîne vide. "
+        "int tronque un flottant : 100.9 reste dans la borne, 101.5 devient "
+        "101. visible_phases 2 ne cache pas ce réglage quand le drapeau est "
+        "vrai : le conteneur s'ouvre aussi dès que inference_steps2 est vrai. "
+        "bool : la chaîne false est vraie, 0 est faux. Wan n'injecte pas "
+        "ce drapeau. Si switch_threshold est déjà l'erreur, elle sort avant. "
+        "switch_threshold2 (ligne 538, libellé Phase 2-3, entier de 0 à 1000, "
+        "sans active_when) vient ensuite : large donne « Phase 2-3 must be "
+        "an integer. » même à une phase, dès que guidance_max_phases vaut "
+        "au moins 3. L'usine 0 passe. La comparaison des deux seuils, ligne "
+        "1407, ne tourne que si guidance_phases vaut encore 3 et que les "
+        "deux seuils sont des nombres. Ce n'est pas ce saut. "
+        "validate_settings renvoie cette erreur. process_tasks_cli compte "
+        "la tâche comme sautée et quitte avec le code 0, sans MP4. "
+        f"{value_note} {phase_note} {flag_note} {max_note} "
+        f"Architecture finale {architecture}, lue dans {shown}."
+    )
+
+
+def _require_phase2_steps(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_model: dict[str, object],
+    first_where: str,
+    architecture_where: str,
+    guidance_max_phases_explicit: bool,
+    custom_sigmas_explicit: bool,
+    custom_sigmas_schedulers_explicit: bool,
+    custom_sigmas_continuous_explicit: bool,
+    custom_sigmas_switch_scale_explicit: bool,
+    image_ref_explicit: bool,
+    guide_custom_explicit: bool,
+    kiwi_ref_explicit: bool,
+    sliding_window_explicit: bool,
+    queue_model_mode: object,
+    queue_video_prompt_type: object,
+    queue_audio_prompt_type: object,
+    queue_discard_last_frames: object,
+    queue_custom_settings: object,
+    queue_custom_sigmas: object,
+    queue_guidance_phases: object,
+    queue_sample_solver: object,
+    queue_switch_threshold: object,
+    queue_switch_threshold2: object,
+    queue_num_inference_steps2: object,
+) -> None:
+    """Refuse un ``num_inference_steps2`` qui fait sauter la tâche.
+
+    ``extra_settings`` le contrôle juste après ``switch_threshold``.
+    Wan n'injecte pas ``inference_steps2``. L'usine 3 passe. ``large``,
+    ``True``, 0 et 101 sont refusés. Le CLI sort 0, sans MP4.
+    ``switch_threshold2`` n'est pas ce saut.
+    """
+    if _frame_scheduler_skips_extra_settings(
+        merged,
+        settings,
+        sliding_window_explicit,
+        first_architecture,
+        queue_discard_last_frames,
+    ):
+        return
+    if _collect_parse_stops_before_sigmas(
+        merged,
+        settings,
+        first_architecture,
+        first_model,
+        image_ref_explicit,
+        guide_custom_explicit,
+        kiwi_ref_explicit,
+        queue_model_mode,
+        queue_video_prompt_type,
+        queue_audio_prompt_type,
+        queue_custom_settings,
+    ):
+        return
+    if _iter_defs_crashes(merged):
+        return
+    if guidance_max_phases_explicit:
+        max_raw: object = merged.get("guidance_max_phases", 0)
+    elif _injected_custom_sigmas(first_architecture):
+        max_raw = 3
+    else:
+        max_raw = 0
+    steps_flag = merged["inference_steps2"] if "inference_steps2" in merged else False
+    shown_steps = _phase2_steps_visible(steps_flag, max_raw)
+    if shown_steps is None or not shown_steps:
+        return
+    if _sigma_path_blocks_extra_settings(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        custom_sigmas_explicit,
+        custom_sigmas_schedulers_explicit,
+        custom_sigmas_continuous_explicit,
+        custom_sigmas_switch_scale_explicit,
+        queue_custom_sigmas,
+        queue_guidance_phases,
+        queue_sample_solver,
+        queue_switch_threshold,
+        queue_switch_threshold2,
+    ):
+        return
+    raw_phases = _queue_or_settings(queue_guidance_phases, settings, "guidance_phases", 1)
+    video = _queue_or_settings(queue_video_prompt_type, settings, "video_prompt_type", "")
+    tiling = bool(merged["phase_2_spatial_tiling"]) if "phase_2_spatial_tiling" in merged else False
+    if _normalize_phases_crash(raw_phases, video, tiling):
+        return
+    phases = 2 if raw_phases == "2~" else raw_phases
+    max_int = _coerced_int(max_raw)
+    if max_int is None:
+        return
+    locked = bool(merged["lock_guidance_phases"]) if "lock_guidance_phases" in merged else False
+    active = _guidance_phases_active(phases, locked, max_int)
+    if active is None or not active:
+        return
+    row = _visible_phases_int(merged, 2)
+    if row is None:
+        return
+    switch_on = bool(merged["switch_threshold"]) if "switch_threshold" in merged else False
+    if not (row >= 2 or switch_on or bool(steps_flag)):
+        return
+    raw = _queue_or_settings(
+        queue_num_inference_steps2,
+        settings,
+        "num_inference_steps2",
+        _FACTORY_PHASE2_STEPS,
+    )
+    word, parsed = _extra_integer(raw)
+    message = _bound_error("Phase 2 Steps", word, parsed, _PHASE2_STEPS_MIN, _PHASE2_STEPS_MAX)
+    if message is None:
+        return
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    shown = architecture_where or first_where or model_type
+    if (
+        queue_num_inference_steps2 is not _QUEUE_MODEL_MODE_UNSET
+        and queue_num_inference_steps2 is not None
+    ):
+        value_note = "La file envoie num_inference_steps2."
+    elif "num_inference_steps2" in settings:
+        value_note = "Le JSON de réglages envoie num_inference_steps2. L'usine est 3."
+    else:
+        value_note = "models/_settings.json laisse num_inference_steps2 à 3."
+    if queue_guidance_phases is not _QUEUE_MODEL_MODE_UNSET and queue_guidance_phases is not None:
+        phase_note = "La file envoie guidance_phases."
+    elif "guidance_phases" in settings:
+        phase_note = "Le JSON de réglages envoie guidance_phases."
+    else:
+        phase_note = "models/_settings.json laisse guidance_phases à 1."
+    flag_note = (
+        "Le JSON écrit inference_steps2. bool de WanGP : la chaîne false "
+        "est vraie, 0 est faux. Wan n'injecte pas ce drapeau."
+    )
+    if guidance_max_phases_explicit:
+        max_note = (
+            "Le JSON écrit guidance_max_phases. "
+            f"La valeur retenue est {max_raw!r}."
+        )
+    elif _injected_custom_sigmas(first_architecture):
+        max_note = (
+            "La clé est absente du JSON. query_model_def de wan_handler pose "
+            f"guidance_max_phases à 3 pour {first_architecture}. "
+            "Un finetune qui change seulement l'architecture laisse cette valeur."
+        )
+    else:
+        max_note = "Le premier JSON n'injecte pas guidance_max_phases."
+    _raise_phase2_steps(
+        raw,
+        raw_phases,
+        message,
+        value_note,
+        phase_note,
+        flag_note,
         max_note,
         architecture,
         shown,
