@@ -164,7 +164,12 @@ réécrit le dict avant ce contrôle. Un type ``integer`` devient ``text`` :
 le flottant 1,5 est la chaîne ``1.5``, puis extra_settings refuse
 « must be an integer ». Un type ``int`` reste entier : le même flottant
 est refusé avant extra_settings (« Expected an integer value. »).
-Le CLI sort 0, sans MP4.
+Un type ``dropdown`` avec des ``choices`` non vides refuse une valeur
+hors liste avant extra_settings (« Expected one of the dropdown choices. »).
+``_setting_kind("dropdown")`` vaut ``string`` : extra_settings ignore
+la valeur, donc le saut vient seulement de ce parse. Une liste de choix
+vide, ou une valeur qui n'est pas une liste, devient ``text`` et ne saute
+pas. Le CLI sort 0, sans MP4.
 """
 
 from __future__ import annotations
@@ -3090,7 +3095,10 @@ def _require_video_model_definition(
     ``exaggeration`` est contrôlé ensuite, même mécanisme, minimum 0,25
     et maximum 2. 3, ``3`` et 2,01 sont refusés. Si ``pace`` 9 est
     visible, cette erreur-là sort avant. Le pré-parse qui transforme un
-    type ``integer`` en texte n'est pas ce saut.
+    type ``integer`` en texte n'est pas ce saut. Un type ``dropdown``
+    dont ``choices`` n'est pas vide refuse une valeur hors liste avant
+    ce pré-parse numérique (« Expected one of the dropdown choices. »).
+    ``_setting_kind`` voit une chaîne et laisserait passer.
     """
     if root is None:
         return
@@ -3216,6 +3224,25 @@ def _require_video_model_definition(
             f"Écrire {flag} à faux dans un JSON de {model_type}, ou retirer "
             f"l'architecture {first_architecture} de ce premier fichier."
         )
+    _require_custom_dropdowns(
+        merged,
+        settings,
+        model_type,
+        first_architecture,
+        first_model,
+        first_where,
+        architecture_where,
+        custom_settings_where,
+        image_ref_explicit,
+        guide_custom_explicit,
+        kiwi_ref_explicit,
+        sliding_window_explicit,
+        queue_model_mode,
+        queue_video_prompt_type,
+        queue_audio_prompt_type,
+        queue_discard_last_frames,
+        queue_custom_settings,
+    )
     _require_chrono_final_architecture(
         merged,
         settings,
@@ -5551,6 +5578,7 @@ def _require_nag_alpha(
     )
 
 
+_CUSTOM_DROPDOWN_MAX = 5
 _PACE_ID = "pace"
 _PACE_LABEL = "Pace"
 _PACE_MIN = 0.2
@@ -5803,6 +5831,279 @@ def _pace_values(
             f"{note} La clé pace est absente, ou custom_settings n'est pas un dict."
         )
     return bag["pace"], note
+
+
+def _normalize_custom_setting_name(name: object) -> str:
+    """``_normalize_custom_setting_name`` de ``wgp.py``."""
+    return re.sub(r"[^a-z0-9_]+", "_", str(name or "").strip().lower()).strip("_")
+
+
+def _assign_custom_setting_id(
+    setting: dict[str, object],
+    index: int,
+    used: set[str],
+) -> str:
+    """Id lu par ``collect_custom_settings_from_inputs``.
+
+    L'id explicite est normalisé. Sinon ``name``, puis ``param``. Un nom
+    absent devient ``Custom Setting N``, donc ``custom_setting_N``. Une
+    collision reprend ``custom_setting_{index+1}`` sans second essai.
+    """
+    explicit = setting.get("id", None)
+    setting_id = ""
+    if explicit is not None and len(str(explicit).strip()) > 0:
+        setting_id = _normalize_custom_setting_name(explicit)
+    if not setting_id:
+        for field in ("name", "param"):
+            if field not in setting:
+                continue
+            setting_id = _normalize_custom_setting_name(setting.get(field, ""))
+            if setting_id:
+                break
+    if not setting_id:
+        setting_id = _normalize_custom_setting_name(f"Custom Setting {index + 1}")
+    if not setting_id or setting_id in used:
+        setting_id = f"custom_setting_{index + 1}"
+    used.add(setting_id)
+    return setting_id
+
+
+def _dropdown_choice_pairs(setting: dict[str, object]) -> list[tuple[str, object]] | None:
+    """``get_custom_setting_dropdown_choices`` une fois le type normalisé.
+
+    Une liste vide, ou une valeur qui n'est pas une liste, vaut ``None`` :
+    WanGP réécrit alors le type en ``text``.
+    """
+    choices = setting.get("choices", [])
+    if not isinstance(choices, list):
+        return None
+    normalized: list[tuple[str, object]] = []
+    for choice in choices:
+        if isinstance(choice, (list, tuple)) and len(choice) >= 2:
+            normalized.append((str(choice[0]), choice[1]))
+        else:
+            normalized.append((str(choice), choice))
+    if not normalized:
+        return None
+    return normalized
+
+
+def _dropdown_value_rejected(raw: object, choices: list[tuple[str, object]]) -> bool:
+    """``parse_custom_setting_typed_value`` pour un type encore ``dropdown``.
+
+    ``None`` et une chaîne vide reviennent avant les choix. Une valeur
+    égale, ou égale après ``str``, est acceptée. La comparaison porte
+    sur la valeur du couple, pas sur son libellé.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if len(raw) == 0:
+            return False
+    for _choice_label, value in choices:
+        if raw == value or str(raw) == str(value):
+            return False
+    return True
+
+
+def _custom_mode_visible(setting: dict[str, object], model_mode: object) -> bool:
+    """``custom_setting_mode_visible``. Lève ``TypeError`` si l'appartenance lève."""
+    for key, excluded in (("model_mode", False), ("model_mode_not", True)):
+        if key not in setting:
+            continue
+        modes = setting[key]
+        if not isinstance(modes, (list, tuple)):
+            modes = [modes]
+        if (model_mode in modes) == excluded:
+            return False
+    return True
+
+
+def _custom_dropdown_visible(
+    setting: dict[str, object],
+    video: str,
+    audio: str,
+    model_mode: object,
+) -> bool | None:
+    """``custom_setting_visible`` au moment du parse strict.
+
+    ``None`` si ``model_mode in modes`` lève : le processus ne sort pas 0.
+    """
+    try:
+        if not _custom_mode_visible(setting, model_mode):
+            return False
+    except TypeError:
+        return None
+    return _custom_guide_visible(setting, video, audio)
+
+
+def _custom_settings_bag(
+    settings: dict[str, object],
+    queue_custom_settings: object,
+) -> tuple[dict[object, object] | None, str]:
+    """Dict ``custom_settings`` lu par ``collect_custom_settings_from_inputs``.
+
+    La file remplace tout le dict. ``None`` dans la file ne remplace pas.
+    Une valeur qui n'est pas un dict est lue comme un dict vide.
+    """
+    if queue_custom_settings is not _QUEUE_MODEL_MODE_UNSET and queue_custom_settings is not None:
+        bag: object = queue_custom_settings
+        note = "La file envoie custom_settings."
+    elif "custom_settings" in settings:
+        bag = settings["custom_settings"]
+        note = "Le JSON de réglages envoie custom_settings."
+    else:
+        return None, "Pas de dict custom_settings : la valeur est absente."
+    if not isinstance(bag, dict):
+        return None, f"{note} custom_settings n'est pas un dict."
+    return bag, note
+
+
+def _raise_dropdown_choice(
+    setting_id: str,
+    raw: object,
+    collect_label: str,
+    note: str,
+    architecture: str,
+    shown: str,
+) -> Never:
+    """Le menu saute la tâche avant ``extra_settings``."""
+    raise Wan2GPError(
+        "La tâche est sautée avant toute vidéo. "
+        f"custom_settings contient l'id {setting_id} de type dropdown et "
+        f"la valeur vaut {raw!r}, hors de choices. "
+        "collect_custom_settings_from_inputs (wgp.py, strict=True) appelle "
+        "parse_custom_setting_typed_value avant extra_settings.validate_inputs. "
+        "CUSTOM_SETTING_TYPES garde dropdown. "
+        f"Le message est « {collect_label} Expected one of the dropdown choices. ». "
+        "Le libellé de la copie n'est pas tronqué au premier « ( ». "
+        "Sans label, il vaut Custom Setting et l'index d'énumération à partir de 1, "
+        "y compris les éléments qui ne sont pas des dict. "
+        "_setting_kind(dropdown) vaut string : extra_settings ignore la valeur. "
+        "Le saut vient seulement de ce parse. "
+        "Une valeur égale, ou égale après str, passe. None et une chaîne vide aussi. "
+        "Une liste de choix vide, ou une valeur qui n'est pas une liste, devient text "
+        "et ne saute pas. Le sixième objet est ignoré. "
+        "CUSTOM_SETTING_DROPDOWN_MAX vaut 5, comme le scan : un sixième menu "
+        "n'est pas lu. "
+        "validate_settings renvoie cette erreur. "
+        "process_tasks_cli compte la tâche comme sautée et quitte avec le code 0, sans MP4. "
+        f"{note} "
+        f"Architecture finale {architecture}, lue dans {shown}."
+    )
+
+
+def _require_custom_dropdowns(
+    merged: dict[str, object],
+    settings: dict[str, object],
+    model_type: str,
+    first_architecture: str | None,
+    first_model: dict[str, object],
+    first_where: str,
+    architecture_where: str,
+    custom_settings_where: str,
+    image_ref_explicit: bool,
+    guide_custom_explicit: bool,
+    kiwi_ref_explicit: bool,
+    sliding_window_explicit: bool,
+    queue_model_mode: object,
+    queue_video_prompt_type: object,
+    queue_audio_prompt_type: object,
+    queue_discard_last_frames: object,
+    queue_custom_settings: object,
+) -> None:
+    """Refuse une valeur absente des choix d'un menu custom.
+
+    ``collect_custom_settings_from_inputs`` tourne avec ``strict=True``
+    avant ``extra_settings``. Un type ``dropdown`` dont ``choices`` n'est
+    pas vide renvoie « Expected one of the dropdown choices. ». La tâche
+    est sautée, ``process_tasks_cli`` sort 0, sans MP4.
+    ``_setting_kind("dropdown")`` vaut ``string`` : les bornes de ``pace``
+    et d'``exaggeration`` ne voient pas cette valeur. Une liste vide, ou
+    une valeur qui n'est pas une liste, fait repasser le type en ``text``.
+    ``None`` et une chaîne vide passent. Une valeur égale, ou égale après
+    ``str``, aussi. Le sixième objet dépasse ``CUSTOM_SETTINGS_MAX``.
+    Un réglage masqué par ``video_prompt_type``, ``audio_prompt_type`` ou
+    ``model_mode`` n'est pas parsé. Si le frame scheduler lève, ce parse
+    n'est pas atteint.
+    """
+    if _frame_scheduler_skips_extra_settings(
+        merged,
+        settings,
+        sliding_window_explicit,
+        first_architecture,
+        queue_discard_last_frames,
+    ):
+        return
+    letters = _resolved_prompt_letters(
+        merged,
+        settings,
+        first_architecture,
+        first_model,
+        image_ref_explicit,
+        guide_custom_explicit,
+        kiwi_ref_explicit,
+        queue_video_prompt_type,
+        queue_audio_prompt_type,
+    )
+    if letters is None:
+        return
+    video, audio, _before_filter, _ref = letters
+    model_mode = _effective_model_mode(settings, queue_model_mode)
+    raw_list = merged.get("custom_settings")
+    if not isinstance(raw_list, list):
+        return
+    bag, note = _custom_settings_bag(settings, queue_custom_settings)
+    architecture = merged.get("architecture")
+    if not isinstance(architecture, str) or not architecture:
+        architecture = model_type
+    shown = custom_settings_where or architecture_where or first_where or model_type
+    used: set[str] = set()
+    dropdown_count = 0
+    for index, item in enumerate(raw_list[:_CUSTOM_SETTINGS_SCAN]):
+        if not isinstance(item, dict):
+            continue
+        setting_id = _assign_custom_setting_id(item, index, used)
+        collect_type = _collect_parse_type(item)
+        kept_dropdown = False
+        if collect_type == "dropdown":
+            dropdown_count += 1
+            pairs = _dropdown_choice_pairs(item)
+            kept_dropdown = (
+                dropdown_count <= _CUSTOM_DROPDOWN_MAX and pairs is not None
+            )
+        else:
+            pairs = None
+        visible = _custom_dropdown_visible(item, video, audio, model_mode)
+        if visible is None:
+            return
+        if not visible:
+            continue
+        raw: object = None
+        if bag is not None and setting_id in bag:
+            raw = bag[setting_id]
+        if collect_type == "int":
+            _parsed, error = _parse_collected_int(raw)
+            if error is not None and setting_id in {_PACE_ID, _EXAGGERATION_ID}:
+                return
+            continue
+        if not kept_dropdown or pairs is None:
+            continue
+        if not _dropdown_value_rejected(raw, pairs):
+            continue
+        if "label" in item:
+            collect_label = str(item["label"])
+        else:
+            collect_label = f"Custom Setting {index + 1}"
+        _raise_dropdown_choice(
+            setting_id,
+            raw,
+            collect_label,
+            note,
+            architecture,
+            shown,
+        )
 
 
 def _require_pace(

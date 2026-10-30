@@ -14937,6 +14937,328 @@ class DryRunTest(unittest.TestCase):
             self.assertIn("Exaggeration must be at most 2", message)
             self.assertIn("code 0", message)
 
+    def test_dropdown_outside_choices_is_skipped(self) -> None:
+        """Une valeur hors liste saute avant extra_settings. Le libellé n'est pas tronqué."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": ["slow", "fast"]},
+                    ],
+                },
+                {"custom_settings": {"pace": "nope"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn(
+                "Custom Setting 1 Expected one of the dropdown choices.",
+                message,
+            )
+            self.assertIn("code 0", message)
+            self.assertNotIn("Pace must", message)
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {
+                            "id": "pace",
+                            "type": "dropdown",
+                            "label": "Custom Pace (boost)",
+                            "choices": ["slow", "fast"],
+                        }
+                    ],
+                },
+                {"custom_settings": {"pace": "nope"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn(
+                "Custom Pace (boost) Expected one of the dropdown choices.",
+                message,
+            )
+            self.assertIn("boost", message)
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        "nope",
+                        {
+                            "id": "pace",
+                            "type": "dropdown",
+                            "choices": [["Slow", "slow"]],
+                        },
+                    ],
+                },
+                {"custom_settings": {"pace": "fast"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn(
+                "Custom Setting 2 Expected one of the dropdown choices.",
+                str(caught.exception),
+            )
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "NAG": True,
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": ["slow", "fast"]},
+                        {"id": "exaggeration"},
+                    ],
+                },
+                {
+                    "NAG_alpha": 2.01,
+                    "NAG_scale": 1,
+                    "NAG_tau": 3.5,
+                    "custom_settings": {"pace": "nope", "exaggeration": 3},
+                },
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Expected one of the dropdown choices.", message)
+            self.assertNotIn("NAG Alpha", message)
+            self.assertNotIn("Exaggeration must", message)
+
+    def test_dropdown_keeps_a_video_when_the_value_is_allowed(self) -> None:
+        """Égalité, str, vide, choix vides, menu masqué et sixième objet passent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "wan"
+            allowed = (
+                {"pace": "slow"},
+                {"pace": " fast "},
+                {"pace": "slow"},
+                {"pace": None},
+                {"pace": ""},
+                {"pace": "   "},
+                {"pace": 1},
+                {"pace": "1"},
+                {},
+            )
+            for raw in allowed[:6]:
+                _write_model(
+                    root,
+                    {
+                        "architecture": "t2v_1.3B",
+                        "custom_settings": [
+                            {
+                                "id": "pace",
+                                "type": "dropdown",
+                                "choices": ["slow", "fast"],
+                            }
+                        ],
+                    },
+                    {"custom_settings": raw},
+                )
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": [["Slow", "slow"]]},
+                    ],
+                },
+                {"custom_settings": {"pace": "slow"}},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": [["Slow", "slow"]]},
+                    ],
+                },
+                {"custom_settings": {"pace": "Slow"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("Expected one of the dropdown choices.", str(caught.exception))
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": [1, 2]},
+                    ],
+                },
+                {"custom_settings": {"pace": "1"}},
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            for model in (
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": []},
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": "slow"},
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown"},
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [{"id": "x"}] * 5
+                    + [
+                        {
+                            "id": "pace",
+                            "type": "dropdown",
+                            "choices": ["slow", "fast"],
+                        }
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {
+                            "id": "pace",
+                            "type": "dropdown",
+                            "choices": ["slow", "fast"],
+                            "video_prompt_type": "V",
+                        }
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {
+                            "id": "pace",
+                            "type": "dropdown",
+                            "choices": ["slow", "fast"],
+                            "model_mode": [2],
+                        }
+                    ],
+                },
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {
+                            "id": "Pace",
+                            "type": "dropdown",
+                            "choices": ["slow", "fast"],
+                        }
+                    ],
+                },
+            ):
+                items = model["custom_settings"]
+                bag: dict[str, object] = {"pace": "nope"}
+                if (
+                    isinstance(items, list)
+                    and items
+                    and isinstance(items[0], dict)
+                    and items[0].get("id") == "Pace"
+                ):
+                    bag = {"Pace": "nope"}
+                _write_model(root, model, {"custom_settings": bag})
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "sliding_window": True,
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": ["slow", "fast"]},
+                    ],
+                },
+                {
+                    "sliding_window_discard_last_frames": "large",
+                    "custom_settings": {"pace": "nope"},
+                },
+            )
+            wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {"id": "pace", "type": "int"},
+                        {"id": "mood", "type": "dropdown", "choices": ["slow", "fast"]},
+                    ],
+                },
+                {"custom_settings": {"pace": 1.5, "mood": "nope"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            message = str(caught.exception)
+            self.assertIn("Expected an integer value.", message)
+            self.assertNotIn("dropdown choices", message)
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "custom_settings": [
+                        {
+                            "id": "Pace",
+                            "type": "dropdown",
+                            "choices": ["slow", "fast"],
+                        }
+                    ],
+                },
+                {"custom_settings": {"pace": "nope"}},
+            )
+            with self.assertRaises(Wan2GPError) as caught:
+                wan2gp_runner._require_video_model_definition(root, "t2v_1.3B")
+            self.assertIn("Expected one of the dropdown choices.", str(caught.exception))
+
+    def test_dropdown_stops_before_the_gpu(self) -> None:
+        """Le processus n'est pas lancé quand le menu n'a pas la valeur."""
+        config = load_pipeline_config(ROOT / "config" / "pipeline.yaml")
+        theme = load_catalog(ROOT / "config" / "themes.yaml")["cozy_cafe"]
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "wan"
+            root.mkdir()
+            (root / "wgp.py").write_text("settings_version = 2.81\n", encoding="utf-8")
+            _write_model(
+                root,
+                {
+                    "architecture": "t2v_1.3B",
+                    "name": "T2V",
+                    "custom_settings": [
+                        {"id": "pace", "type": "dropdown", "choices": ["slow", "fast"]},
+                    ],
+                },
+                {"custom_settings": {"pace": "nope"}},
+            )
+
+            def refuse_gpu(*_args: object, **_kwargs: object) -> _FakeProcess:
+                raise AssertionError("GPU")
+
+            with mock.patch(
+                "src.wan2gp_runner.subprocess.Popen",
+                side_effect=_popen_except_ffmpeg(refuse_gpu),
+            ):
+                with self.assertRaises(Wan2GPError) as caught:
+                    generate(
+                        GenerationRequest(
+                            prompt=build_prompt(theme, 7),
+                            settings=replace(config.wan, root=root),
+                            output_dir=base / "out",
+                            aspect="9:16",
+                            dry_run=False,
+                        )
+                    )
+            message = str(caught.exception)
+            self.assertIn("Expected one of the dropdown choices.", message)
+            self.assertIn("code 0", message)
+
 
 def _write_model(
     root: Path,
