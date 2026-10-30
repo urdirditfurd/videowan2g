@@ -1,0 +1,6 @@
+node_modules/
+.env
+generated_videos/*.mp4
+generated_videos/timing.json
+generated_videos/.generation.lock
+*.log
