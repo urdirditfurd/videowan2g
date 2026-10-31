@@ -1,0 +1,5 @@
+node_modules/
+.env
+generated_videos/*.mp4
+generated_videos/*.webm
+generated_videos/timing-cache.json
